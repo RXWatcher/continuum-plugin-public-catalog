@@ -23,6 +23,7 @@ type Host interface {
 	ListLibraryMedia(ctx context.Context, req runtimehost.ListLibraryMediaRequest) (*runtimehost.ListLibraryMediaResponse, error)
 	GetCatalogStats(ctx context.Context, libraryIDs []string) (*runtimehost.CatalogStats, error)
 	CallPluginHTTP(ctx context.Context, req runtimehost.CallPluginHTTPRequest) (*runtimehost.CallPluginHTTPResponse, error)
+	CallPluginJSON(ctx context.Context, req runtimehost.CallPluginJSONRequest) error
 }
 
 type Deps struct {

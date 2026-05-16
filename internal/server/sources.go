@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
@@ -71,20 +69,13 @@ func (s *RuntimeHostSource) getJSON(ctx context.Context, host Host, path string,
 	if host == nil {
 		return fmt.Errorf("continuum host is not connected")
 	}
-	resp, err := host.CallPluginHTTP(ctx, runtimehost.CallPluginHTTPRequest{
+	if err := host.CallPluginJSON(ctx, runtimehost.CallPluginJSONRequest{
 		InstallationID: s.installationID,
-		Method:         http.MethodGet,
 		Path:           path,
 		Query:          query,
-	})
-	if err != nil {
+		Response:       out,
+	}); err != nil {
 		return fmt.Errorf("call %s source: %w", s.mediaType, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s source returned %d: %s", s.mediaType, resp.StatusCode, string(resp.Body))
-	}
-	if err := json.Unmarshal(resp.Body, out); err != nil {
-		return fmt.Errorf("decode %s source: %w", s.mediaType, err)
 	}
 	return nil
 }

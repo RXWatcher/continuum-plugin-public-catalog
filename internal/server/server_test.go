@@ -33,6 +33,10 @@ func (f *fakeHost) CallPluginHTTP(context.Context, runtimehost.CallPluginHTTPReq
 	return &runtimehost.CallPluginHTTPResponse{StatusCode: http.StatusNotFound}, nil
 }
 
+func (f *fakeHost) CallPluginJSON(context.Context, runtimehost.CallPluginJSONRequest) error {
+	return nil
+}
+
 func TestCatalogMediaRejectsUnavailableMediaType(t *testing.T) {
 	host := &fakeHost{}
 	h := New(Deps{
