@@ -1,0 +1,171 @@
+{
+  "plugin_id": "continuum.public-catalog",
+  "version": "0.1.0",
+  "checksum": "__CHECKSUM__",
+  "continuum_api_version": "v1",
+  "supported_platforms": [
+    {
+      "os": "linux",
+      "arch": "amd64"
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "http_routes.v1",
+      "id": "public-catalog",
+      "display_name": "Public Catalog",
+      "description": "Public advertising page with stats, embedded HTML, and signed-token catalog browsing."
+    }
+  ],
+  "http_routes": [
+    {
+      "id": "public_page",
+      "method": "GET",
+      "path": "/",
+      "access": "public"
+    },
+    {
+      "id": "catalog_page",
+      "method": "GET",
+      "path": "/catalog",
+      "access": "public"
+    },
+    {
+      "id": "public_api",
+      "method": "*",
+      "path": "/api/public/*",
+      "access": "public"
+    },
+    {
+      "id": "catalog_api",
+      "method": "*",
+      "path": "/api/catalog/*",
+      "access": "public"
+    },
+    {
+      "id": "admin_api",
+      "method": "*",
+      "path": "/api/admin/*",
+      "access": "admin"
+    },
+    {
+      "id": "admin_page",
+      "method": "GET",
+      "path": "/admin",
+      "access": "admin",
+      "navigable": true,
+      "navigation_label": "Public Catalog",
+      "navigation_kind": "admin"
+    }
+  ],
+  "global_config_schema": [
+    {
+      "key": "token_secret",
+      "title": "Catalog token secret",
+      "description": "Required HMAC secret for signing public catalog access links. Use at least 32 random bytes.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"]}",
+      "required": true,
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Token secret",
+            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "required": true,
+            "secret": true
+          }
+        ]
+      }
+    },
+    {
+      "key": "standalone_http_listen",
+      "title": "Standalone HTTP listen address",
+      "description": "Optional public listener address, e.g. 127.0.0.1:8090 or :8090. Prefer loopback behind a reverse proxy.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Listen address",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          }
+        ]
+      }
+    },
+    {
+      "key": "public_base_url",
+      "title": "Public base URL",
+      "description": "Optional absolute URL used when generated catalog links are returned.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Public URL",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          }
+        ]
+      }
+    },
+    {
+      "key": "ad_html",
+      "title": "Embedded advertising HTML",
+      "description": "HTML rendered on the public landing page.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "HTML",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+          }
+        ]
+      }
+    },
+    {
+      "key": "token_ttl_hours",
+      "title": "Catalog token TTL hours",
+      "description": "Default generated catalog link lifetime. Defaults to 168.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":1}}}",
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Hours",
+            "control": "ADMIN_FORM_CONTROL_NUMBER"
+          }
+        ]
+      }
+    },
+    {
+      "key": "ebook_installation_id",
+      "title": "Ebook portal installation ID",
+      "description": "Optional Continuum plugin installation ID for continuum.ebooks. Enables ebook stats and browsing through authenticated inter-plugin HTTP.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Installation ID",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          }
+        ]
+      }
+    },
+    {
+      "key": "audiobook_installation_id",
+      "title": "Audiobook portal installation ID",
+      "description": "Optional Continuum plugin installation ID for continuum.audiobooks. Enables audiobook stats and browsing through authenticated inter-plugin HTTP.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Installation ID",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          }
+        ]
+      }
+    }
+  ]
+}
