@@ -9,6 +9,10 @@ The plugin reads catalog information through Continuum host and plugin APIs. It
 does not read Arr databases, local files, or Continuum's database tables
 directly.
 
+## Detailed Operations Docs
+
+- [Setup, debugging, and communication flows](docs/setup-debug-flows.md)
+
 ## Features
 
 - Standalone public HTTP listener.
