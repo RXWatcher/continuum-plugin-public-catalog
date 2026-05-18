@@ -1,6 +1,6 @@
 {
   "plugin_id": "continuum.public-catalog",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "checksum": "__CHECKSUM__",
   "continuum_api_version": "v1",
   "supported_platforms": [
@@ -62,16 +62,14 @@
     {
       "key": "token_secret",
       "title": "Catalog token secret",
-      "description": "Required HMAC secret for signing public catalog access links. Use at least 32 random bytes.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"]}",
-      "required": true,
+      "description": "Optional HMAC secret for signing public catalog access links. Leave empty to let the plugin generate and persist a secret automatically. If provided, use at least 32 random bytes.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
       "admin_form": {
         "fields": [
           {
             "key": "value",
             "label": "Token secret",
             "control": "ADMIN_FORM_CONTROL_PASSWORD",
-            "required": true,
             "secret": true
           }
         ]

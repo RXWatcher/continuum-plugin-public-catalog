@@ -29,14 +29,15 @@ type Host interface {
 }
 
 type Deps struct {
-	Host                func() Host
-	Logger              hclog.Logger
-	TokenSecret         string
-	PublicBaseURL       string
-	AdHTML              string
-	DefaultTokenTTLHour int
-	StatsCacheTTL       time.Duration
-	Sources             []CatalogSource
+	Host                 func() Host
+	Logger               hclog.Logger
+	TokenSecret          string
+	TokenSecretGenerated bool
+	PublicBaseURL        string
+	AdHTML               string
+	DefaultTokenTTLHour  int
+	StatsCacheTTL        time.Duration
+	Sources              []CatalogSource
 
 	statsCache *statsCache
 }
@@ -302,7 +303,122 @@ func hCreateToken(d Deps) http.HandlerFunc {
 
 func hAdminPage(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeHTML(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Public Catalog Admin</title><style>`+css()+`</style></head><body><main class="shell"><section class="panel"><h1>Public Catalog</h1><button class="button" id="gen">Generate catalog link</button><pre id="out"></pre></section></main><script>gen.onclick=async()=>{const r=await fetch("api/admin/catalog-token",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}); out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>`)
+		secretStatus := "Auto-generated"
+		if strings.TrimSpace(d.TokenSecret) != "" && !d.TokenSecretGenerated {
+			secretStatus = "Configured"
+		}
+		baseURL := d.PublicBaseURL
+		if baseURL == "" {
+			baseURL = "Relative plugin URLs"
+		}
+		writeHTML(w, `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Public Catalog Admin</title>
+<style>`+css()+adminCSS()+`</style>
+</head>
+<body>
+<main class="shell admin-shell">
+  <section class="hero admin-hero">
+    <div>
+      <p class="eyebrow">Plugin administration</p>
+      <h1>Public Catalog</h1>
+      <p class="lead">Create signed catalog links and check the public catalog status.</p>
+    </div>
+    <a class="button" href="../" target="_blank" rel="noreferrer">Open public page</a>
+  </section>
+
+  <section class="admin-grid">
+    <div class="panel admin-panel">
+      <div class="panel-head">
+        <h2>Generate Link</h2>
+        <span id="state" class="status-pill">Ready</span>
+      </div>
+      <form id="tokenForm" class="admin-form">
+        <label>Expires in hours
+          <input id="hours" name="hours" type="number" min="1" max="8760" value="168">
+        </label>
+        <fieldset>
+          <legend>Media types</legend>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="movie" checked> Movies</label>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="tv" checked> TV</label>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="episode" checked> Episodes</label>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="ebook"> Ebooks</label>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="audiobook"> Audiobooks</label>
+        </fieldset>
+        <label>Library IDs
+          <input id="libraryIds" name="libraryIds" placeholder="Optional comma-separated IDs">
+        </label>
+        <button class="button primary" type="submit">Generate catalog link</button>
+      </form>
+      <div id="result" class="result-box" hidden>
+        <label>Catalog URL
+          <textarea id="urlOut" readonly rows="3"></textarea>
+        </label>
+        <div class="actions">
+          <button class="button" id="copy" type="button">Copy</button>
+          <a class="button" id="openLink" href="#" target="_blank" rel="noreferrer">Open</a>
+        </div>
+        <dl class="details compact">
+          <dt>Expires</dt><dd id="expiresOut"></dd>
+        </dl>
+      </div>
+      <pre id="errorOut" class="error-box" hidden></pre>
+    </div>
+
+    <aside class="panel admin-panel">
+      <h2>Status</h2>
+      <dl class="details">
+        <dt>Token secret</dt><dd>`+html.EscapeString(secretStatus)+`</dd>
+        <dt>Default TTL</dt><dd>`+strconv.Itoa(defaultPositive(d.DefaultTokenTTLHour, 168))+` hours</dd>
+        <dt>Public base URL</dt><dd>`+html.EscapeString(baseURL)+`</dd>
+        <dt>Extra sources</dt><dd>`+strconv.Itoa(len(d.Sources))+` configured</dd>
+      </dl>
+      <button class="button" id="refreshStats" type="button">Refresh stats</button>
+      <div id="statsOut" class="stats slim"><div><strong>...</strong><span>Loading</span></div></div>
+    </aside>
+  </section>
+</main>
+<script>
+const params=new URLSearchParams(location.search);
+const hostToken=params.get("token")||"";
+if(params.has("token")){params.delete("token");history.replaceState(null,"",location.pathname+(params.toString()?"?"+params.toString():"")+location.hash)}
+function headers(){const h={"Content-Type":"application/json"};if(hostToken)h.Authorization="Bearer "+hostToken;return h}
+function list(name){return [...document.querySelectorAll('[name="'+name+'"]:checked')].map(el=>el.value)}
+function csv(id){return document.getElementById(id).value.split(",").map(v=>v.trim()).filter(Boolean)}
+function setState(text,bad=false){state.textContent=text;state.className=bad?"status-pill bad":"status-pill"}
+function showError(message){errorOut.hidden=false;errorOut.textContent=message;setState("Error",true)}
+function hideError(){errorOut.hidden=true;errorOut.textContent=""}
+tokenForm.addEventListener("submit",async event=>{
+  event.preventDefault(); hideError(); setState("Generating");
+  const body={hours:Number(hours.value)||0,mediaTypes:list("mediaTypes"),libraryIds:csv("libraryIds")};
+  try{
+    const r=await fetch("api/admin/catalog-token",{method:"POST",headers:headers(),body:JSON.stringify(body)});
+    const data=await r.json();
+    if(!r.ok) throw new Error(data?.error?.message||"Request failed");
+    result.hidden=false; urlOut.value=new URL(data.url,location.href).toString(); openLink.href=urlOut.value; expiresOut.textContent=new Date(data.expiresAt).toLocaleString(); setState("Generated");
+  }catch(err){showError(err.message||String(err))}
+});
+copy.addEventListener("click",async()=>{await navigator.clipboard.writeText(urlOut.value);setState("Copied")});
+async function loadStats(){
+  try{
+    const r=await fetch("api/public/stats");
+    const data=await r.json();
+    if(!r.ok) throw new Error(data?.error?.message||"Stats unavailable");
+    statsOut.innerHTML="";
+    const counts=data.mediaTypeCounts||[];
+    if(!counts.length){statsOut.innerHTML='<div><strong>'+Number(data.totalItems||0)+'</strong><span>Total items</span></div>';return}
+    for(const item of counts){const div=document.createElement("div");div.innerHTML='<strong>'+Number(item.count||0)+'</strong><span>'+esc(item.mediaType||"items")+'</span>';statsOut.appendChild(div)}
+  }catch(err){statsOut.innerHTML='<div><strong>!</strong><span>'+esc(err.message||"Unavailable")+'</span></div>'}
+}
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+refreshStats.addEventListener("click",loadStats);
+loadStats();
+</script>
+</body>
+</html>`)
 	}
 }
 
@@ -494,6 +610,13 @@ func defaultString(v, fallback string) string {
 	return strings.TrimSpace(v)
 }
 
+func defaultPositive(v, fallback int) int {
+	if v <= 0 {
+		return fallback
+	}
+	return v
+}
+
 func cleanList(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, v := range in {
@@ -556,4 +679,8 @@ func cleanMediaTypes(in []string) ([]string, bool) {
 
 func css() string {
 	return `body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;background:#0f1115;color:#f5f7fb} .shell{max-width:1180px;margin:0 auto;padding:32px 20px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:48px 0}.eyebrow{color:#8eb6ff;text-transform:uppercase;font-size:12px;letter-spacing:.08em}.hero h1{font-size:44px;line-height:1.05;margin:0 0 12px}.lead{color:#b8c0cf;font-size:18px}.stat{border:1px solid #2b3342;border-radius:8px;padding:20px;min-width:180px;background:#171b23}.stat span{display:block;font-size:36px;font-weight:700}.stat small{color:#aab3c2}.panel{border-top:1px solid #2b3342;padding:28px 0}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}.stats div,.card{background:#171b23;border:1px solid #2b3342;border-radius:8px}.stats div{padding:16px}.stats strong{display:block;font-size:26px}.stats span,.card p{color:#aab3c2}.toolbar{display:grid;grid-template-columns:1fr 160px 160px;gap:10px;position:sticky;top:0;background:#0f1115;padding:16px 0}input,select,.button{border:1px solid #344052;background:#171b23;color:#f5f7fb;border-radius:6px;padding:10px 12px}.button{cursor:pointer}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}.poster{aspect-ratio:2/3;background:#222936;border-radius:8px 8px 0 0;overflow:hidden}.poster img{width:100%;height:100%;object-fit:cover}.body{padding:12px}.body h3{font-size:15px;margin:0 0 8px}@media(max-width:700px){.hero{display:block}.toolbar{grid-template-columns:1fr}.hero h1{font-size:34px}}`
+}
+
+func adminCSS() string {
+	return `.admin-shell{max-width:1220px}.admin-hero{padding-bottom:24px}.admin-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px}.admin-panel{border:1px solid #2b3342;border-radius:8px;background:#151922;padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.admin-panel h2{margin:0 0 16px}.admin-form{display:grid;gap:16px}.admin-form label{display:grid;gap:7px;color:#c8d0dd}.admin-form fieldset{border:1px solid #2b3342;border-radius:8px;margin:0;padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}.admin-form legend{color:#c8d0dd;padding:0 6px}.check{display:flex!important;align-items:center;gap:8px}.check input{width:auto}.primary{background:#2563eb;border-color:#3b82f6}.status-pill{display:inline-flex;align-items:center;border:1px solid #2f6fed;border-radius:999px;color:#9ec5ff;padding:6px 10px;font-size:12px}.status-pill.bad{border-color:#b54747;color:#ffadad}.result-box,.error-box{margin-top:18px}.result-box textarea{width:100%;box-sizing:border-box;resize:vertical}.actions{display:flex;gap:10px;margin-top:10px}.details{display:grid;grid-template-columns:130px 1fr;gap:10px;margin:0 0 16px}.details dt{color:#8994a8}.details dd{margin:0;color:#f5f7fb;overflow-wrap:anywhere}.compact{margin-top:12px}.error-box{white-space:pre-wrap;border:1px solid #6b2d2d;background:#2b1518;color:#ffc4c4;border-radius:8px;padding:12px}.slim{grid-template-columns:1fr 1fr}@media(max-width:900px){.admin-grid{grid-template-columns:1fr}.slim{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}}`
 }

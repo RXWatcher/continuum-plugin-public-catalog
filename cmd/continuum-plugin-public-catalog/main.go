@@ -55,12 +55,13 @@ func main() {
 			Host: func() server.Host {
 				return sdkruntime.Host()
 			},
-			Logger:              logger,
-			TokenSecret:         cfg.TokenSecret,
-			PublicBaseURL:       cfg.PublicBaseURL,
-			AdHTML:              cfg.AdHTML,
-			DefaultTokenTTLHour: cfg.TokenTTLHours,
-			Sources:             sources,
+			Logger:               logger,
+			TokenSecret:          cfg.TokenSecret,
+			TokenSecretGenerated: cfg.TokenSecretGenerated,
+			PublicBaseURL:        cfg.PublicBaseURL,
+			AdHTML:               cfg.AdHTML,
+			DefaultTokenTTLHour:  cfg.TokenTTLHours,
+			Sources:              sources,
 		}))
 
 		if addr := cfg.StandaloneHTTPListen; addr != "" {

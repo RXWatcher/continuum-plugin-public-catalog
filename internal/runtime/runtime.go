@@ -2,8 +2,12 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 
 	pluginv1 "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginproto/continuum/plugin/v1"
@@ -12,6 +16,7 @@ import (
 
 type Config struct {
 	TokenSecret          string
+	TokenSecretGenerated bool
 	StandaloneHTTPListen string
 	PublicBaseURL        string
 	AdHTML               string
@@ -61,6 +66,14 @@ func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 			cfg.AudioInstallationID = stringValue(m["value"], firstString(m))
 		}
 	}
+	if cfg.TokenSecret == "" {
+		secret, err := autoTokenSecret()
+		if err != nil {
+			return nil, err
+		}
+		cfg.TokenSecret = secret
+		cfg.TokenSecretGenerated = true
+	}
 	if len(cfg.TokenSecret) < 32 {
 		return nil, fmt.Errorf("token_secret must be at least 32 characters")
 	}
@@ -82,6 +95,39 @@ func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 	s.cfg = cfg
 	s.mu.Unlock()
 	return &pluginv1.ConfigureResponse{}, nil
+}
+
+func autoTokenSecret() (string, error) {
+	path, err := tokenSecretPath()
+	if err != nil {
+		return "", err
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		secret := string(data)
+		if len(secret) >= 32 {
+			return secret, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("read generated token_secret: %w", err)
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate token_secret: %w", err)
+	}
+	secret := hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(secret), 0600); err != nil {
+		return "", fmt.Errorf("persist generated token_secret: %w", err)
+	}
+	return secret, nil
+}
+
+func tokenSecretPath() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve executable path: %w", err)
+	}
+	return filepath.Join(filepath.Dir(executable), ".public-catalog-token-secret"), nil
 }
 
 func stringValue(candidates ...any) string {

@@ -195,6 +195,17 @@ func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
 	if !strings.Contains(body, `fetch("api/admin/catalog-token"`) {
 		t.Fatalf("admin page should fetch token generation through a relative plugin URL")
 	}
+	if !strings.Contains(body, `h.Authorization="Bearer "+hostToken`) {
+		t.Fatalf("admin page should forward the host token on admin API calls")
+	}
+	if !strings.Contains(body, `history.replaceState`) {
+		t.Fatalf("admin page should strip the host token from the address bar after capture")
+	}
+	for _, want := range []string{"Generate Link", "Media types", "Library IDs", "Refresh stats"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("admin page missing %q", want)
+		}
+	}
 	if strings.Contains(body, `fetch("/api/admin/catalog-token"`) {
 		t.Fatalf("admin page should not fetch from the host root")
 	}
