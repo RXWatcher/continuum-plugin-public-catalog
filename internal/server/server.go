@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -157,7 +159,7 @@ async function load(reset=false) {
   const p = new URLSearchParams({token, q: q.value, sort: sort.value, page_size: "48"});
   if (type.value) p.set("media_type", type.value);
   if (next) p.set("page_token", next);
-  const res = await fetch("/api/catalog/media?" + p.toString());
+  const res = await fetch("api/catalog/media?" + p.toString());
   if (!res.ok) { document.getElementById('results').textContent = "Catalog unavailable"; return; }
   const data = await res.json();
   next = data.nextPageToken || "";
@@ -199,7 +201,7 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "invalid_token", "catalog access token is invalid or expired")
 			return
 		}
-		host := d.Host()
+		host := currentHost(d)
 		if host == nil {
 			writeErr(w, http.StatusServiceUnavailable, "host_unavailable", "continuum host is not connected")
 			return
@@ -255,11 +257,24 @@ func hCreateToken(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createTokenRequest
 		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				if errors.Is(err, io.EOF) {
+					req = createTokenRequest{}
+				} else {
+					writeErr(w, http.StatusBadRequest, "bad_json", "invalid JSON body")
+					return
+				}
+			}
 		}
 		hours := req.Hours
 		if hours < 1 {
 			hours = d.DefaultTokenTTLHour
+		}
+		if hours < 1 {
+			hours = 168
+		}
+		if hours > 24*365 {
+			hours = 24 * 365
 		}
 		exp := time.Now().Add(time.Duration(hours) * time.Hour)
 		token, err := signToken(d.TokenSecret, tokenClaims{
@@ -287,7 +302,7 @@ func hCreateToken(d Deps) http.HandlerFunc {
 
 func hAdminPage(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeHTML(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Public Catalog Admin</title><style>`+css()+`</style></head><body><main class="shell"><section class="panel"><h1>Public Catalog</h1><button class="button" id="gen">Generate catalog link</button><pre id="out"></pre></section></main><script>gen.onclick=async()=>{const r=await fetch("/api/admin/catalog-token",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}); out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>`)
+		writeHTML(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Public Catalog Admin</title><style>`+css()+`</style></head><body><main class="shell"><section class="panel"><h1>Public Catalog</h1><button class="button" id="gen">Generate catalog link</button><pre id="out"></pre></section></main><script>gen.onclick=async()=>{const r=await fetch("api/admin/catalog-token",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}); out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>`)
 	}
 }
 
@@ -295,7 +310,7 @@ func hostStats(ctx context.Context, d Deps, libraryIDs []string) (*runtimehost.C
 	if d.statsCache != nil {
 		return d.statsCache.get(ctx, d.Host, libraryIDs, d.Sources)
 	}
-	host := d.Host()
+	host := currentHost(d)
 	if host == nil {
 		return nil, http.ErrServerClosed
 	}
@@ -330,7 +345,7 @@ func (c *statsCache) get(ctx context.Context, hostFn func() Host, libraryIDs []s
 	}
 	c.mu.Unlock()
 
-	host := hostFn()
+	host := currentHost(Deps{Host: hostFn})
 	if host == nil {
 		return nil, http.ErrServerClosed
 	}
@@ -350,6 +365,13 @@ func (c *statsCache) get(ctx context.Context, hostFn func() Host, libraryIDs []s
 	c.entries[key] = statsCacheEntry{expires: now.Add(c.ttl), stats: stats}
 	c.mu.Unlock()
 	return stats, nil
+}
+
+func currentHost(d Deps) Host {
+	if d.Host == nil {
+		return nil
+	}
+	return d.Host()
 }
 
 func withSourceStats(ctx context.Context, host Host, base *runtimehost.CatalogStats, sources []CatalogSource) (*runtimehost.CatalogStats, error) {

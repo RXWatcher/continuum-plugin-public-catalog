@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,5 +143,160 @@ func TestStatsEndpointUsesShortCache(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&host.statsCalls); got != 1 {
 		t.Fatalf("stats calls = %d, want 1", got)
+	}
+}
+
+func TestCatalogPageUsesProxyRelativeAPIURL(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+	})
+	token, err := signToken(testSecret, tokenClaims{
+		Scope:     "catalog",
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/catalog?token="+token, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `fetch("api/catalog/media?"`) {
+		t.Fatalf("catalog page should fetch media through a relative plugin URL")
+	}
+	if strings.Contains(body, `fetch("/api/catalog/media?`) {
+		t.Fatalf("catalog page should not fetch from the host root")
+	}
+}
+
+func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.Header.Set("X-Continuum-User-Role", "admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `fetch("api/admin/catalog-token"`) {
+		t.Fatalf("admin page should fetch token generation through a relative plugin URL")
+	}
+	if strings.Contains(body, `fetch("/api/admin/catalog-token"`) {
+		t.Fatalf("admin page should not fetch from the host root")
+	}
+}
+
+func TestNilHostReportsUnavailableInsteadOfPanicking(t *testing.T) {
+	h := New(Deps{
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stats status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+
+	token, err := signToken(testSecret, tokenClaims{
+		Scope:     "catalog",
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/catalog/media?token="+token, nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("media status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
+func TestCreateTokenRejectsMalformedJSON(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", bytes.NewBufferString("{"))
+	req.Header.Set("X-Continuum-User-Role", "admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestCreateTokenDefaultsAndCapsTTL(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 0,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", bytes.NewBufferString(`{"hours":999999}`))
+	req.Header.Set("X-Continuum-User-Role", "admin")
+	rec := httptest.NewRecorder()
+	start := time.Now().UTC()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Token     string `json:"token"`
+		URL       string `json:"url"`
+		ExpiresAt string `json:"expiresAt"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Token == "" || body.URL == "" {
+		t.Fatalf("token response missing token/url: %+v", body)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, body.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse expiresAt: %v", err)
+	}
+	max := start.Add(24 * 365 * time.Hour).Add(time.Minute)
+	if expiresAt.After(max) {
+		t.Fatalf("expiresAt = %s, want capped to at most one year", expiresAt)
+	}
+}
+
+func TestCreateTokenAcceptsEmptyBodyWithDefaultTTL(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 2,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", http.NoBody)
+	req.Header.Set("X-Continuum-User-Role", "admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
