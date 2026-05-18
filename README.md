@@ -30,7 +30,7 @@ directly.
 | `token_secret` | yes | HMAC secret for signing public catalog tokens. Use at least 32 random bytes. |
 | `standalone_http_listen` | no | Public listener address, for example `127.0.0.1:8090` or `:8090`. |
 | `public_base_url` | no | Absolute public URL used when generated links are returned. |
-| `ad_html` | no | HTML rendered on the public landing page. |
+| `ad_html` | no | Trusted operator-provided HTML rendered on the public landing page. Do not paste user-generated or untrusted content. |
 | `token_ttl_hours` | no | Default generated catalog link lifetime. Defaults to 168 hours. |
 | `ebook_installation_id` | no | Ebooks portal installation ID used for ebook stats and browsing. |
 | `audiobook_installation_id` | no | Audiobooks portal installation ID used for audiobook stats and browsing. |

@@ -107,14 +107,14 @@
     },
     {
       "key": "ad_html",
-      "title": "Embedded advertising HTML",
-      "description": "HTML rendered on the public landing page.",
+      "title": "Trusted advertising HTML",
+      "description": "Trusted operator-provided HTML rendered on the public landing page. Do not paste user-generated or untrusted content here.",
       "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
       "admin_form": {
         "fields": [
           {
             "key": "value",
-            "label": "HTML",
+            "label": "Trusted HTML",
             "control": "ADMIN_FORM_CONTROL_TEXTAREA"
           }
         ]

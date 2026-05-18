@@ -245,6 +245,9 @@ func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
 			t.Fatalf("admin page missing %q", want)
 		}
 	}
+	if !strings.Contains(body, "Trusted HTML") {
+		t.Fatalf("admin page should label ad_html as trusted operator HTML")
+	}
 	if strings.Contains(body, `fetch("/api/admin/catalog-token"`) {
 		t.Fatalf("admin page should not fetch from the host root")
 	}

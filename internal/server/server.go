@@ -382,6 +382,7 @@ func hAdminPage(d Deps) http.HandlerFunc {
         <dt>Token secret</dt><dd>`+html.EscapeString(secretStatus)+`</dd>
         <dt>Default TTL</dt><dd>`+strconv.Itoa(defaultPositive(d.DefaultTokenTTLHour, 168))+` hours</dd>
         <dt>Public base URL</dt><dd>`+html.EscapeString(baseURL)+`</dd>
+        <dt>Trusted HTML</dt><dd>Operator-provided landing-page HTML only; never paste user content.</dd>
         <dt>Extra sources</dt><dd>`+strconv.Itoa(len(d.Sources))+` configured</dd>
       </dl>
       <button class="button" id="refreshStats" type="button">Refresh stats</button>
