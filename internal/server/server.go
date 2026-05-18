@@ -35,9 +35,12 @@ type Deps struct {
 	TokenSecretGenerated bool
 	PublicBaseURL        string
 	AdHTML               string
+	CatalogPassword      string
+	StandaloneListen     string
 	DefaultTokenTTLHour  int
 	StatsCacheTTL        time.Duration
 	Sources              []CatalogSource
+	HTMLStore            HTMLStore
 
 	statsCache *statsCache
 }
@@ -54,8 +57,11 @@ func New(d Deps) http.Handler {
 	r.Get("/", hLanding(d))
 	r.Get("/catalog", hCatalogPage(d))
 	r.Get("/api/public/stats", hStats(d))
+	r.Post("/api/public/catalog-login", hCatalogLogin(d))
 	r.Get("/api/catalog/media", hCatalogMedia(d))
 	r.Post("/api/admin/catalog-token", requireAdmin(hCreateToken(d)))
+	r.Get("/api/admin/html-section", requireAdmin(hGetHTMLSection(d)))
+	r.Put("/api/admin/html-section", requireAdmin(hSaveHTMLSection(d)))
 	r.Get("/admin", requireAdmin(hAdminPage(d)))
 	return r
 }
@@ -120,7 +126,7 @@ func hLanding(d Deps) http.HandlerFunc {
     <div class="stat"><span>`+strconv.Itoa(total)+`</span><small>items available</small></div>
   </section>
   <section class="panel" id="stats"><h2>Stats</h2>`+statsHTML(stats)+`</section>
-  <section class="panel ad"><h2>Featured</h2>`+adHTML(d.AdHTML)+`</section>
+  <section class="panel ad"><h2>Featured</h2>`+adHTML(publishedHTML(r.Context(), d))+`</section>
 </main>
 </body>
 </html>`)
@@ -129,9 +135,8 @@ func hLanding(d Deps) http.HandlerFunc {
 
 func hCatalogPage(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("token")
-		if _, err := verifyToken(d.TokenSecret, token, time.Now()); err != nil {
-			writeErr(w, http.StatusUnauthorized, "invalid_token", "catalog access token is invalid or expired")
+		if _, ok := catalogClaimsFromRequest(d, r); !ok {
+			writeCatalogPasswordPage(w, r)
 			return
 		}
 		writeHTML(w, `<!doctype html>
@@ -157,7 +162,8 @@ const token = new URLSearchParams(location.search).get('token');
 let next = "";
 async function load(reset=false) {
   if (reset) { next = ""; document.getElementById('results').innerHTML = ""; }
-  const p = new URLSearchParams({token, q: q.value, sort: sort.value, page_size: "48"});
+  const p = new URLSearchParams({q: q.value, sort: sort.value, page_size: "48"});
+  if (token) p.set("token", token);
   if (type.value) p.set("media_type", type.value);
   if (next) p.set("page_token", next);
   const res = await fetch("api/catalog/media?" + p.toString());
@@ -184,6 +190,36 @@ load(true);
 	}
 }
 
+func hCatalogLogin(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_json", "invalid JSON body")
+			return
+		}
+		if d.CatalogPassword == "" || req.Password != d.CatalogPassword {
+			writeErr(w, http.StatusUnauthorized, "invalid_password", "catalog password is invalid")
+			return
+		}
+		token, err := signToken(d.TokenSecret, tokenClaims{Scope: "catalog"})
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "token_failed", err.Error())
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "public_catalog_auth",
+			Value:    token,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   r.TLS != nil,
+		})
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
 func hStats(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stats, err := hostStats(r.Context(), d, nil)
@@ -197,9 +233,9 @@ func hStats(d Deps) http.HandlerFunc {
 
 func hCatalogMedia(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		claims, err := verifyToken(d.TokenSecret, r.URL.Query().Get("token"), time.Now())
-		if err != nil {
-			writeErr(w, http.StatusUnauthorized, "invalid_token", "catalog access token is invalid or expired")
+		claims, ok := catalogClaimsFromRequest(d, r)
+		if !ok {
+			writeErr(w, http.StatusUnauthorized, "catalog_auth_required", "catalog password or bypass token is required")
 			return
 		}
 		host := currentHost(d)
@@ -274,20 +310,8 @@ func hCreateToken(d Deps) http.HandlerFunc {
 				}
 			}
 		}
-		hours := req.Hours
-		if hours < 1 {
-			hours = d.DefaultTokenTTLHour
-		}
-		if hours < 1 {
-			hours = 168
-		}
-		if hours > 24*365 {
-			hours = 24 * 365
-		}
-		exp := time.Now().Add(time.Duration(hours) * time.Hour)
 		token, err := signToken(d.TokenSecret, tokenClaims{
 			Scope:      "catalog",
-			ExpiresAt:  exp.Unix(),
 			LibraryIDs: cleanList(req.LibraryIDs),
 			MediaTypes: cleanList(req.MediaTypes),
 		})
@@ -301,11 +325,113 @@ func hCreateToken(d Deps) http.HandlerFunc {
 			link = strings.TrimRight(d.PublicBaseURL, "/") + "/" + path
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"token":     token,
-			"url":       link,
-			"expiresAt": exp.UTC().Format(time.RFC3339),
+			"token": token,
+			"url":   link,
 		})
 	}
+}
+
+func hGetHTMLSection(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"html": publishedHTML(r.Context(), d)})
+	}
+}
+
+func hSaveHTMLSection(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if d.HTMLStore == nil {
+			writeErr(w, http.StatusServiceUnavailable, "html_store_unavailable", "HTML editor storage is not configured")
+			return
+		}
+		var req struct {
+			HTML string `json:"html"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_json", "invalid JSON body")
+			return
+		}
+		if len(req.HTML) > 200_000 {
+			writeErr(w, http.StatusBadRequest, "html_too_large", "HTML section must be 200 KB or smaller")
+			return
+		}
+		if err := d.HTMLStore.SaveHTML(r.Context(), req.HTML); err != nil {
+			writeErr(w, http.StatusInternalServerError, "html_save_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
+func catalogClaimsFromRequest(d Deps, r *http.Request) (tokenClaims, bool) {
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		claims, err := verifyToken(d.TokenSecret, token, time.Now())
+		return claims, err == nil
+	}
+	if cookie, err := r.Cookie("public_catalog_auth"); err == nil && cookie.Value != "" {
+		claims, err := verifyToken(d.TokenSecret, cookie.Value, time.Now())
+		return claims, err == nil
+	}
+	if d.CatalogPassword == "" {
+		return tokenClaims{Scope: "catalog"}, true
+	}
+	return tokenClaims{}, false
+}
+
+func writeCatalogPasswordPage(w http.ResponseWriter, r *http.Request) {
+	body := `<!doctype html>
+<html lang="en" data-theme="` + adminTheme(r) + `">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Catalog Password</title>
+<style>` + css() + adminCSS() + `</style>
+</head>
+<body>
+<main class="shell">
+  <section class="hero">
+    <div>
+      <p class="eyebrow">Public catalog</p>
+      <h1>Catalog password</h1>
+      <p class="lead">Enter the catalog password to browse available media.</p>
+    </div>
+  </section>
+  <section class="panel">
+    <form id="login" class="admin-form">
+      <label>Password
+        <input id="password" name="password" type="password" autofocus>
+      </label>
+      <button class="button primary" type="submit">Open catalog</button>
+    </form>
+    <pre id="error" class="error-box" hidden></pre>
+  </section>
+</main>
+<script>
+login.addEventListener("submit",async event=>{
+  event.preventDefault(); error.hidden=true;
+  try{
+    const r=await fetch("api/public/catalog-login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:password.value})});
+    const data=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(data?.error?.message||"Password rejected");
+    location.reload();
+  }catch(err){error.hidden=false; error.textContent=err.message||String(err)}
+});
+</script>
+</body>
+</html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(body))
+}
+
+func publishedHTML(ctx context.Context, d Deps) string {
+	if d.HTMLStore == nil {
+		return d.AdHTML
+	}
+	html, err := d.HTMLStore.LoadHTML(ctx)
+	if err != nil || strings.TrimSpace(html) == "" {
+		return d.AdHTML
+	}
+	return html
 }
 
 func hAdminPage(d Deps) http.HandlerFunc {
@@ -317,6 +443,14 @@ func hAdminPage(d Deps) http.HandlerFunc {
 		baseURL := d.PublicBaseURL
 		if baseURL == "" {
 			baseURL = "Relative plugin URLs"
+		}
+		listenAddress := d.StandaloneListen
+		if listenAddress == "" {
+			listenAddress = "Not configured"
+		}
+		passwordStatus := "Configured"
+		if d.CatalogPassword == "" {
+			passwordStatus = "Not configured"
 		}
 		writeHTML(w, `<!doctype html>
 <html lang="en" data-theme="`+adminTheme(r)+`">
@@ -333,7 +467,7 @@ func hAdminPage(d Deps) http.HandlerFunc {
       <a class="button" href="/admin/plugins">&larr; Back to plugins</a>
       <p class="eyebrow">Plugin administration</p>
       <h1>Public Catalog</h1>
-      <p class="lead">Create signed catalog links and check the public catalog status.</p>
+      <p class="lead">Publish a public landing page, protect the catalog with a password, and create permanent bypass links.</p>
     </div>
     <a class="button" href="../" target="_blank" rel="noreferrer">Open public page</a>
   </section>
@@ -341,13 +475,10 @@ func hAdminPage(d Deps) http.HandlerFunc {
   <section class="admin-grid">
     <div class="panel admin-panel">
       <div class="panel-head">
-        <h2>Generate Link</h2>
+        <h2>Generate bypass token</h2>
         <span id="state" class="status-pill">Ready</span>
       </div>
       <form id="tokenForm" class="admin-form">
-        <label>Expires in hours
-          <input id="hours" name="hours" type="number" min="1" max="8760" value="168">
-        </label>
         <fieldset>
           <legend>Media types</legend>
           <label class="check"><input type="checkbox" name="mediaTypes" value="movie" checked> Movies</label>
@@ -369,18 +500,33 @@ func hAdminPage(d Deps) http.HandlerFunc {
           <button class="button" id="copy" type="button">Copy</button>
           <a class="button" id="openLink" href="#" target="_blank" rel="noreferrer">Open</a>
         </div>
-        <dl class="details compact">
-          <dt>Expires</dt><dd id="expiresOut"></dd>
-        </dl>
       </div>
       <pre id="errorOut" class="error-box" hidden></pre>
+    </div>
+
+    <div class="panel admin-panel">
+      <div class="panel-head">
+        <h2>HTML section editor</h2>
+        <span id="htmlState" class="status-pill">Loading</span>
+      </div>
+      <form id="htmlForm" class="admin-form">
+        <label>Published landing-page HTML
+          <textarea id="htmlInput" rows="14" spellcheck="false"></textarea>
+        </label>
+        <div class="actions">
+          <button class="button primary" type="submit">Publish HTML</button>
+          <button class="button" id="previewHtml" type="button">Preview</button>
+        </div>
+      </form>
+      <div class="preview-box" id="htmlPreview"></div>
     </div>
 
     <aside class="panel admin-panel">
       <h2>Status</h2>
       <dl class="details">
         <dt>Token secret</dt><dd>`+html.EscapeString(secretStatus)+`</dd>
-        <dt>Default TTL</dt><dd>`+strconv.Itoa(defaultPositive(d.DefaultTokenTTLHour, 168))+` hours</dd>
+        <dt>Catalog password</dt><dd>`+html.EscapeString(passwordStatus)+`</dd>
+        <dt>Public listener</dt><dd>`+html.EscapeString(listenAddress)+`</dd>
         <dt>Public base URL</dt><dd>`+html.EscapeString(baseURL)+`</dd>
         <dt>Trusted HTML</dt><dd>Operator-provided landing-page HTML only; never paste user content.</dd>
         <dt>Extra sources</dt><dd>`+strconv.Itoa(len(d.Sources))+` configured</dd>
@@ -402,15 +548,33 @@ function showError(message){errorOut.hidden=false;errorOut.textContent=message;s
 function hideError(){errorOut.hidden=true;errorOut.textContent=""}
 tokenForm.addEventListener("submit",async event=>{
   event.preventDefault(); hideError(); setState("Generating");
-  const body={hours:Number(hours.value)||0,mediaTypes:list("mediaTypes"),libraryIds:csv("libraryIds")};
+  const body={mediaTypes:list("mediaTypes"),libraryIds:csv("libraryIds")};
   try{
     const r=await fetch("api/admin/catalog-token",{method:"POST",headers:headers(),body:JSON.stringify(body)});
     const data=await r.json();
     if(!r.ok) throw new Error(data?.error?.message||"Request failed");
-    result.hidden=false; urlOut.value=new URL(data.url,location.href).toString(); openLink.href=urlOut.value; expiresOut.textContent=new Date(data.expiresAt).toLocaleString(); setState("Generated");
+    result.hidden=false; urlOut.value=new URL(data.url,location.href).toString(); openLink.href=urlOut.value; setState("Generated");
   }catch(err){showError(err.message||String(err))}
 });
 copy.addEventListener("click",async()=>{await navigator.clipboard.writeText(urlOut.value);setState("Copied")});
+async function loadHTML(){
+  try{
+    const r=await fetch("api/admin/html-section",{headers:headers()});
+    const data=await r.json();
+    if(!r.ok) throw new Error(data?.error?.message||"HTML unavailable");
+    htmlInput.value=data.html||""; htmlPreview.innerHTML=htmlInput.value; htmlState.textContent="Ready";
+  }catch(err){htmlState.textContent="Error"; htmlState.className="status-pill bad"; htmlPreview.textContent=err.message||String(err)}
+}
+htmlForm.addEventListener("submit",async event=>{
+  event.preventDefault(); htmlState.textContent="Publishing"; htmlState.className="status-pill";
+  try{
+    const r=await fetch("api/admin/html-section",{method:"PUT",headers:headers(),body:JSON.stringify({html:htmlInput.value})});
+    const data=await r.json();
+    if(!r.ok) throw new Error(data?.error?.message||"Save failed");
+    htmlPreview.innerHTML=htmlInput.value; htmlState.textContent="Published";
+  }catch(err){htmlState.textContent="Error"; htmlState.className="status-pill bad"; htmlPreview.textContent=err.message||String(err)}
+});
+previewHtml.addEventListener("click",()=>{htmlPreview.innerHTML=htmlInput.value});
 async function loadStats(){
   try{
     const r=await fetch("api/public/stats");
@@ -424,7 +588,7 @@ async function loadStats(){
 }
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 refreshStats.addEventListener("click",loadStats);
-loadStats();
+loadStats(); loadHTML();
 </script>
 </body>
 </html>`)
@@ -691,7 +855,7 @@ func css() string {
 }
 
 func adminCSS() string {
-	return `.admin-shell{max-width:1220px}.admin-hero{padding-bottom:24px}.admin-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px}.admin-panel{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.admin-panel h2{margin:0 0 16px}.admin-form{display:grid;gap:16px}.admin-form label{display:grid;gap:7px;color:var(--muted)}.admin-form fieldset{border:1px solid var(--border);border-radius:8px;margin:0;padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}.admin-form legend{color:var(--muted);padding:0 6px}.check{display:flex!important;align-items:center;gap:8px}.check input{width:auto}.primary{background:var(--primary);border-color:var(--primary-border)}.status-pill{display:inline-flex;align-items:center;border:1px solid var(--primary-border);border-radius:999px;color:var(--accent);padding:6px 10px;font-size:12px}.status-pill.bad{border-color:#b54747;color:#ffadad}.result-box,.error-box{margin-top:18px}.result-box textarea{width:100%;box-sizing:border-box;resize:vertical}.actions{display:flex;gap:10px;margin-top:10px}.details{display:grid;grid-template-columns:130px 1fr;gap:10px;margin:0 0 16px}.details dt{color:var(--muted2)}.details dd{margin:0;color:var(--fg);overflow-wrap:anywhere}.compact{margin-top:12px}.error-box{white-space:pre-wrap;border:1px solid #6b2d2d;background:#2b1518;color:#ffc4c4;border-radius:8px;padding:12px}.slim{grid-template-columns:1fr 1fr}@media(max-width:900px){.admin-grid{grid-template-columns:1fr}.slim{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}}`
+	return `.admin-shell{max-width:1220px}.admin-hero{padding-bottom:24px}.admin-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px}.admin-panel{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.admin-panel h2{margin:0 0 16px}.admin-form{display:grid;gap:16px}.admin-form label{display:grid;gap:7px;color:var(--muted)}.admin-form fieldset{border:1px solid var(--border);border-radius:8px;margin:0;padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}.admin-form legend{color:var(--muted);padding:0 6px}.check{display:flex!important;align-items:center;gap:8px}.check input{width:auto}.primary{background:var(--primary);border-color:var(--primary-border)}.status-pill{display:inline-flex;align-items:center;border:1px solid var(--primary-border);border-radius:999px;color:var(--accent);padding:6px 10px;font-size:12px}.status-pill.bad{border-color:#b54747;color:#ffadad}.result-box,.error-box{margin-top:18px}.result-box textarea{width:100%;box-sizing:border-box;resize:vertical}.actions{display:flex;gap:10px;margin-top:10px}.details{display:grid;grid-template-columns:130px 1fr;gap:10px;margin:0 0 16px}.details dt{color:var(--muted2)}.details dd{margin:0;color:var(--fg);overflow-wrap:anywhere}.compact{margin-top:12px}.error-box{white-space:pre-wrap;border:1px solid #6b2d2d;background:#2b1518;color:#ffc4c4;border-radius:8px;padding:12px}.preview-box{min-height:120px;margin-top:14px;border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:14px;overflow:auto}.slim{grid-template-columns:1fr 1fr}@media(max-width:900px){.admin-grid{grid-template-columns:1fr}.slim{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}}`
 }
 
 func adminTheme(r *http.Request) string {

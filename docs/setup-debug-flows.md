@@ -5,31 +5,36 @@ Version documented: `0.1.0`
 
 ## Purpose
 
-public advertising/catalog surface with signed-token browsing for selected ebook and
+public advertising/catalog surface with public stats, admin-published HTML,
+password-protected browsing, and permanent bypass links for selected ebook and
 audiobook portals.
 
 ## Runtime Dependencies
 
 - Continuum plugin host
-- Configured token_secret and public_base_url
+- Configured token_secret, catalog_password, and public_base_url
+- Optional public_port or advanced standalone_http_listen
 - Optional continuum.ebooks installation
 - Optional continuum.audiobooks installation
 
 ## Setup Checklist
 
 1. Configure token_secret with a strong random secret.
-2. Set public_base_url to the public URL.
-3. Optionally set ebook_installation_id and audiobook_installation_id.
-4. Add ad_html if the landing page should include custom marketing copy.
-5. Open /catalog publicly and test signed browsing links.
+2. Configure catalog_password.
+3. Set public_port for the standalone public site, or set standalone_http_listen for an advanced bind address.
+4. Set public_base_url to the public URL.
+5. Optionally set ebook_installation_id and audiobook_installation_id.
+6. Open the plugin admin page and publish the landing-page HTML section.
+7. Open /catalog publicly, test password login, and test a permanent bypass link.
 
 ## Configuration Reference
 
 - `token_secret`
+- `public_port`
 - `standalone_http_listen`
 - `public_base_url`
+- `catalog_password`
 - `ad_html`
-- `token_ttl_hours`
 - `ebook_installation_id`
 - `audiobook_installation_id`
 
@@ -38,15 +43,15 @@ Use the plugin manifest/admin form as the source of truth for field validation a
 ## Exposed Routes
 
 - `GET / [public]`
-- `GET /catalog [public]`
+- `GET /catalog [public with catalog password or bypass token]`
 - `* /api/public/* [public]`
-- `* /api/catalog/* [public]`
+- `* /api/catalog/* [public with catalog password session or bypass token]`
 - `* /api/admin/* [admin]`
 - `GET /admin [admin]`
 
 ## Capabilities
 
-- `http_routes.v1 (public-catalog) - Public advertising page with stats, embedded HTML, and signed-token catalog browsing.`
+- `http_routes.v1 (public-catalog) - Public advertising page with stats, admin-published HTML, password catalog login, and permanent bypass-token catalog browsing.`
 
 ## Operational Flows
 
@@ -54,21 +59,21 @@ Use the plugin manifest/admin form as the source of truth for field validation a
 
 1. Visitor opens the public catalog page.
 2. The plugin renders configured public/ad content.
-3. For protected catalog browsing, it mints or validates short-lived signed tokens.
+3. For catalog browsing, it validates the shared catalog password, an existing catalog session cookie, or a permanent bypass token.
 4. It calls the selected Ebooks/Audiobooks installation APIs for safe catalog data.
 
 ## How This Plugin Communicates
 
 - Can call Ebooks and Audiobooks portal APIs by installation ID.
 - Serves public routes without normal Continuum login.
-- Uses signed tokens to avoid exposing broad authenticated APIs.
+- Uses signed bypass tokens to avoid exposing broad authenticated APIs.
 
 ## Debugging Runbook
 
-- If public links fail, verify public_base_url and reverse proxy route forwarding.
+- If public links fail, verify public_base_url, public_port/listen configuration, and reverse proxy route forwarding.
 - If catalog sections are empty, confirm installation IDs and that the target portal has visible libraries.
 - If tokens are rejected after restart, confirm token_secret did not change.
-- Keep token_ttl_hours short enough for public use.
+- If password login fails, confirm catalog_password is configured in the plugin settings.
 
 ## Log And Health Checks
 

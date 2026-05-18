@@ -29,6 +29,46 @@ func TestConfigureRejectsShortExplicitTokenSecret(t *testing.T) {
 	}
 }
 
+func TestConfigureMapsPublicPortToStandaloneListenAddress(t *testing.T) {
+	s := New(nil, func(cfg Config) error {
+		if cfg.PublicPort != 8090 {
+			t.Fatalf("PublicPort = %d, want 8090", cfg.PublicPort)
+		}
+		if cfg.StandaloneHTTPListen != ":8090" {
+			t.Fatalf("StandaloneHTTPListen = %q, want :8090", cfg.StandaloneHTTPListen)
+		}
+		return nil
+	})
+	req := configureRequest("public_port", map[string]any{"value": float64(8090)})
+
+	if _, err := s.Configure(t.Context(), req); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+}
+
+func TestConfigureRejectsInvalidPublicPort(t *testing.T) {
+	s := New(nil, nil)
+	req := configureRequest("public_port", map[string]any{"value": float64(70000)})
+
+	if _, err := s.Configure(t.Context(), req); err == nil {
+		t.Fatal("expected invalid public_port to fail")
+	}
+}
+
+func TestConfigureAcceptsCatalogPassword(t *testing.T) {
+	s := New(nil, func(cfg Config) error {
+		if cfg.CatalogPassword != "let-me-in" {
+			t.Fatalf("CatalogPassword = %q, want let-me-in", cfg.CatalogPassword)
+		}
+		return nil
+	})
+	req := configureRequest("catalog_password", map[string]any{"value": "let-me-in"})
+
+	if _, err := s.Configure(t.Context(), req); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+}
+
 func configureRequest(key string, value map[string]any) *pluginv1.ConfigureRequest {
 	v, err := structpb.NewStruct(value)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"sync"
@@ -42,6 +43,7 @@ func main() {
 	var standaloneOnce sync.Once
 	var standaloneAddr atomic.Value
 	var standaloneSrv atomic.Pointer[http.Server]
+	htmlStore := server.NewFileHTMLStore(contentPath(".public-catalog-html-section"))
 
 	rt := pluginrt.New(manifest, func(cfg pluginrt.Config) error {
 		sources := []server.CatalogSource{}
@@ -60,8 +62,11 @@ func main() {
 			TokenSecretGenerated: cfg.TokenSecretGenerated,
 			PublicBaseURL:        cfg.PublicBaseURL,
 			AdHTML:               cfg.AdHTML,
+			CatalogPassword:      cfg.CatalogPassword,
+			StandaloneListen:     cfg.StandaloneHTTPListen,
 			DefaultTokenTTLHour:  cfg.TokenTTLHours,
 			Sources:              sources,
+			HTMLStore:            htmlStore,
 		}))
 
 		if addr := cfg.StandaloneHTTPListen; addr != "" {
@@ -116,6 +121,14 @@ func main() {
 			HttpRoutes: httpSrv,
 		},
 	})
+}
+
+func contentPath(name string) string {
+	executable, err := os.Executable()
+	if err != nil {
+		return name
+	}
+	return filepath.Join(filepath.Dir(executable), name)
 }
 
 func loadManifest() (*pluginv1.PluginManifest, error) {

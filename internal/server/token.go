@@ -55,7 +55,7 @@ func verifyToken(secret, token string, now time.Time) (tokenClaims, error) {
 	if claims.Scope != "catalog" {
 		return claims, fmt.Errorf("%w: wrong scope", errInvalidToken)
 	}
-	if claims.ExpiresAt <= now.Unix() {
+	if claims.ExpiresAt > 0 && claims.ExpiresAt <= now.Unix() {
 		return claims, fmt.Errorf("%w: expired", errInvalidToken)
 	}
 	return claims, nil

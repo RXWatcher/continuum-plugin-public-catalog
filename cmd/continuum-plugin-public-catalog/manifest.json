@@ -77,15 +77,30 @@
     },
     {
       "key": "standalone_http_listen",
-      "title": "Standalone HTTP listen address",
-      "description": "Optional public listener address, e.g. 127.0.0.1:8090 or :8090. Prefer loopback behind a reverse proxy.",
+      "title": "Advanced listen address",
+      "description": "Optional advanced listener address, e.g. 127.0.0.1:8090. If set, this overrides Public port. Prefer loopback behind a reverse proxy.",
       "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
       "admin_form": {
         "fields": [
           {
             "key": "value",
-            "label": "Listen address",
+            "label": "Advanced listen address",
             "control": "ADMIN_FORM_CONTROL_TEXT"
+          }
+        ]
+      }
+    },
+    {
+      "key": "public_port",
+      "title": "Public port",
+      "description": "Optional standalone public website port, for example 8090. The plugin listens on :PORT when this is set and no advanced listen address is provided.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65535}}}",
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Public port",
+            "control": "ADMIN_FORM_CONTROL_NUMBER"
           }
         ]
       }
@@ -106,31 +121,32 @@
       }
     },
     {
-      "key": "ad_html",
-      "title": "Trusted advertising HTML",
-      "description": "Trusted operator-provided HTML rendered on the public landing page. Do not paste user-generated or untrusted content here.",
+      "key": "catalog_password",
+      "title": "Catalog password",
+      "description": "Shared password required to browse /catalog unless a permanent bypass token is used.",
       "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
       "admin_form": {
         "fields": [
           {
             "key": "value",
-            "label": "Trusted HTML",
-            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+            "label": "Catalog password",
+            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "secret": true
           }
         ]
       }
     },
     {
-      "key": "token_ttl_hours",
-      "title": "Catalog token TTL hours",
-      "description": "Default generated catalog link lifetime. Defaults to 168.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":1}}}",
+      "key": "ad_html",
+      "title": "Initial trusted HTML",
+      "description": "Optional initial trusted operator HTML. After setup, edit the published landing-page HTML from the plugin admin section.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
       "admin_form": {
         "fields": [
           {
             "key": "value",
-            "label": "Hours",
-            "control": "ADMIN_FORM_CONTROL_NUMBER"
+            "label": "Initial trusted HTML",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
           }
         ]
       }

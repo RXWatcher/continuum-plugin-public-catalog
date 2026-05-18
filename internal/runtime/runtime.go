@@ -18,8 +18,10 @@ type Config struct {
 	TokenSecret          string
 	TokenSecretGenerated bool
 	StandaloneHTTPListen string
+	PublicPort           int
 	PublicBaseURL        string
 	AdHTML               string
+	CatalogPassword      string
 	TokenTTLHours        int
 	EbookInstallationID  string
 	AudioInstallationID  string
@@ -54,10 +56,14 @@ func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 			cfg.TokenSecret = stringValue(m["value"], firstString(m))
 		case "standalone_http_listen":
 			cfg.StandaloneHTTPListen = stringValue(m["value"], firstString(m))
+		case "public_port":
+			cfg.PublicPort = intValue(m["value"], firstNumber(m), cfg.PublicPort)
 		case "public_base_url":
 			cfg.PublicBaseURL = stringValue(m["value"], firstString(m))
 		case "ad_html":
 			cfg.AdHTML = stringValue(m["value"], firstString(m))
+		case "catalog_password":
+			cfg.CatalogPassword = stringValue(m["value"], firstString(m))
 		case "token_ttl_hours":
 			cfg.TokenTTLHours = intValue(m["value"], firstNumber(m), cfg.TokenTTLHours)
 		case "ebook_installation_id":
@@ -82,6 +88,12 @@ func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return nil, fmt.Errorf("public_base_url must be an absolute URL")
 		}
+	}
+	if cfg.PublicPort < 0 || cfg.PublicPort > 65535 {
+		return nil, fmt.Errorf("public_port must be between 1 and 65535")
+	}
+	if cfg.PublicPort > 0 && cfg.StandaloneHTTPListen == "" {
+		cfg.StandaloneHTTPListen = fmt.Sprintf(":%d", cfg.PublicPort)
 	}
 	if cfg.TokenTTLHours < 1 {
 		cfg.TokenTTLHours = 168
