@@ -211,7 +211,7 @@ func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
 	}
 }
 
-func TestNilHostReportsUnavailableInsteadOfPanicking(t *testing.T) {
+func TestNilHostStatsReturnsEmptyPayloadInsteadOfPanicking(t *testing.T) {
 	h := New(Deps{
 		TokenSecret:         testSecret,
 		DefaultTokenTTLHour: 1,
@@ -221,8 +221,8 @@ func TestNilHostReportsUnavailableInsteadOfPanicking(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("stats status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
 	token, err := signToken(testSecret, tokenClaims{

@@ -135,7 +135,7 @@ func hCatalogPage(d Deps) http.HandlerFunc {
 			return
 		}
 		writeHTML(w, `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="`+adminTheme(r)+`">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -188,7 +188,7 @@ func hStats(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stats, err := hostStats(r.Context(), d, nil)
 		if err != nil {
-			writeErr(w, http.StatusServiceUnavailable, "host_unavailable", err.Error())
+			writeJSON(w, http.StatusOK, runtimehost.CatalogStats{})
 			return
 		}
 		writeJSON(w, http.StatusOK, stats)
@@ -687,9 +687,12 @@ func adminCSS() string {
 }
 
 func adminTheme(r *http.Request) string {
-	theme := r.Header.Get("X-Continuum-Theme")
+	theme := r.URL.Query().Get("theme")
 	if theme == "" {
-		theme = r.URL.Query().Get("theme")
+		theme = r.Header.Get("X-Continuum-Theme")
+	}
+	if theme == "" {
+		theme = r.Header.Get("X-Continuum-User-Theme")
 	}
 	if theme == "" {
 		theme = "default"

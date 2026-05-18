@@ -2,12 +2,11 @@ module github.com/ContinuumApp/continuum-plugin-public-catalog
 
 go 1.26.0
 
-replace github.com/ContinuumApp/continuum-plugin-sdk => /opt/continuum_plugins/continuum-plugin-sdk
-
 require (
-	github.com/ContinuumApp/continuum-plugin-sdk v0.3.8
+	github.com/ContinuumApp/continuum-plugin-sdk v0.3.10
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/hashicorp/go-hclog v1.6.3
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -23,5 +22,4 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60 // indirect
 	google.golang.org/grpc v1.81.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )
