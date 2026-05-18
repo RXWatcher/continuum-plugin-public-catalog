@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,16 @@ func (f *fakeHost) CallPluginHTTP(context.Context, runtimehost.CallPluginHTTPReq
 
 func (f *fakeHost) CallPluginJSON(context.Context, runtimehost.CallPluginJSONRequest) error {
 	return nil
+}
+
+type failingCatalogSource struct{}
+
+func (f failingCatalogSource) MediaType() string { return "ebook" }
+func (f failingCatalogSource) Stats(context.Context, Host) (*runtimehost.CatalogStats, error) {
+	return nil, errors.New("upstream unavailable")
+}
+func (f failingCatalogSource) List(context.Context, Host, runtimehost.ListLibraryMediaRequest) (*runtimehost.ListLibraryMediaResponse, error) {
+	return nil, errors.New("upstream unavailable")
 }
 
 func TestCatalogMediaRejectsUnavailableMediaType(t *testing.T) {
@@ -92,6 +103,34 @@ func TestCatalogMediaKeepsTokenMediaTypeScope(t *testing.T) {
 	}
 	if got := strings.Join(host.mediaReq.MediaTypes, ","); got != "movie" {
 		t.Fatalf("media types = %q, want movie", got)
+	}
+}
+
+func TestCatalogMediaReportsSingleSourceFailure(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+		Sources:             []CatalogSource{failingCatalogSource{}},
+	})
+	token, err := signToken(testSecret, tokenClaims{
+		Scope:      "catalog",
+		ExpiresAt:  time.Now().Add(time.Hour).Unix(),
+		MediaTypes: []string{"ebook"},
+	})
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog/media?token="+token+"&media_type=ebook", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "catalog_source_unavailable") {
+		t.Fatalf("body should identify source failure, got %s", rec.Body.String())
 	}
 }
 

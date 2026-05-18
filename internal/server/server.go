@@ -229,7 +229,7 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			if src := sourceForType(d.Sources, req.MediaTypes[0]); src != nil {
 				resp, err := src.List(r.Context(), host, req)
 				if err != nil {
-					writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
+					writeErr(w, http.StatusBadGateway, "catalog_source_unavailable", "catalog source is unavailable")
 					return
 				}
 				writeJSON(w, http.StatusOK, resp)
