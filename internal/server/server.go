@@ -204,7 +204,7 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 		}
 		host := currentHost(d)
 		if host == nil {
-			writeErr(w, http.StatusServiceUnavailable, "host_unavailable", "continuum host is not connected")
+			writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
 			return
 		}
 		q := r.URL.Query()
@@ -229,7 +229,7 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			if src := sourceForType(d.Sources, req.MediaTypes[0]); src != nil {
 				resp, err := src.List(r.Context(), host, req)
 				if err != nil {
-					writeErr(w, http.StatusServiceUnavailable, "catalog_failed", err.Error())
+					writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
 					return
 				}
 				writeJSON(w, http.StatusOK, resp)
@@ -238,13 +238,20 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 		}
 		resp, err := host.ListLibraryMedia(r.Context(), req)
 		if err != nil {
-			writeErr(w, http.StatusServiceUnavailable, "catalog_failed", err.Error())
+			writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
 			return
 		}
 		if req.PageToken == "" {
 			resp = appendSourceCatalogs(r.Context(), host, resp, d.Sources, req)
 		}
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func emptyCatalogMediaResponse() runtimehost.ListLibraryMediaResponse {
+	return runtimehost.ListLibraryMediaResponse{
+		Items:      []runtimehost.CatalogMediaItem{},
+		TotalCount: 0,
 	}
 }
 

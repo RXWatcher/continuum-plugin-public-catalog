@@ -236,8 +236,11 @@ func TestNilHostStatsReturnsEmptyPayloadInsteadOfPanicking(t *testing.T) {
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("media status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("media status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"Items":[]`) {
+		t.Fatalf("media body should be empty payload, got %s", rec.Body.String())
 	}
 }
 
