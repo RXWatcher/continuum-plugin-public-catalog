@@ -295,10 +295,10 @@ func hCreateToken(d Deps) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, "token_failed", err.Error())
 			return
 		}
-		path := "/catalog?token=" + url.QueryEscape(token)
+		path := "catalog?token=" + url.QueryEscape(token)
 		link := path
 		if d.PublicBaseURL != "" {
-			link = strings.TrimRight(d.PublicBaseURL, "/") + path
+			link = strings.TrimRight(d.PublicBaseURL, "/") + "/" + path
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"token":     token,

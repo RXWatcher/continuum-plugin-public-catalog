@@ -288,6 +288,12 @@ func TestCreateTokenDefaultsAndCapsTTL(t *testing.T) {
 	if body.Token == "" || body.URL == "" {
 		t.Fatalf("token response missing token/url: %+v", body)
 	}
+	if strings.HasPrefix(body.URL, "/") {
+		t.Fatalf("relative plugin catalog URL must not start at host root: %q", body.URL)
+	}
+	if !strings.HasPrefix(body.URL, "catalog?token=") {
+		t.Fatalf("catalog URL = %q, want plugin-relative catalog link", body.URL)
+	}
 	expiresAt, err := time.Parse(time.RFC3339, body.ExpiresAt)
 	if err != nil {
 		t.Fatalf("parse expiresAt: %v", err)
