@@ -1,6 +1,6 @@
 {
   "plugin_id": "continuum.public-catalog",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "checksum": "__CHECKSUM__",
   "continuum_api_version": "v1",
   "supported_platforms": [
