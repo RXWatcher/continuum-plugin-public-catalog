@@ -312,7 +312,7 @@ func hAdminPage(d Deps) http.HandlerFunc {
 			baseURL = "Relative plugin URLs"
 		}
 		writeHTML(w, `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="`+adminTheme(r)+`">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
