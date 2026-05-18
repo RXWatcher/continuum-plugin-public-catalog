@@ -185,6 +185,28 @@ func TestStatsEndpointUsesShortCache(t *testing.T) {
 	}
 }
 
+func TestStatsEndpointKeepsHostStatsWhenOptionalSourceFails(t *testing.T) {
+	host := &fakeHost{}
+	h := New(Deps{
+		Host:                func() Host { return host },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+		StatsCacheTTL:       time.Millisecond,
+		Sources:             []CatalogSource{failingCatalogSource{}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"TotalItems":12`) {
+		t.Fatalf("stats should keep host totals when optional source fails, got %s", rec.Body.String())
+	}
+}
+
 func TestCatalogPageUsesProxyRelativeAPIURL(t *testing.T) {
 	h := New(Deps{
 		Host:                func() Host { return &fakeHost{} },

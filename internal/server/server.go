@@ -509,7 +509,7 @@ func withSourceStats(ctx context.Context, host Host, base *runtimehost.CatalogSt
 		}
 		stats, err := src.Stats(ctx, host)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		base.TotalItems += stats.TotalItems
 		base.MediaTypeCounts = append(base.MediaTypeCounts, stats.MediaTypeCounts...)
