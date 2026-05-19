@@ -15,6 +15,7 @@ import (
 )
 
 type Config struct {
+	DatabaseURL          string
 	TokenSecret          string
 	TokenSecretGenerated bool
 	StandaloneHTTPListen string
@@ -44,14 +45,51 @@ func (s *Server) GetManifest(context.Context, *pluginv1.GetManifestRequest) (*pl
 	return &pluginv1.GetManifestResponse{Manifest: s.manifest}, nil
 }
 
+func DefaultAppConfig() Config {
+	return Config{TokenTTLHours: 168}
+}
+
+func NormalizeAppConfig(cfg Config) (Config, error) {
+	if cfg.TokenSecret == "" {
+		secret, err := autoTokenSecret()
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.TokenSecret = secret
+		cfg.TokenSecretGenerated = true
+	}
+	if len(cfg.TokenSecret) < 32 {
+		return Config{}, fmt.Errorf("token_secret must be at least 32 characters")
+	}
+	if cfg.PublicBaseURL != "" {
+		u, err := url.Parse(cfg.PublicBaseURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return Config{}, fmt.Errorf("public_base_url must be an absolute URL")
+		}
+	}
+	if cfg.PublicPort < 0 || cfg.PublicPort > 65535 {
+		return Config{}, fmt.Errorf("public_port must be between 1 and 65535")
+	}
+	if cfg.PublicPort > 0 && cfg.StandaloneHTTPListen == "" {
+		cfg.StandaloneHTTPListen = fmt.Sprintf(":%d", cfg.PublicPort)
+	}
+	if cfg.TokenTTLHours < 1 {
+		cfg.TokenTTLHours = 168
+	}
+	cfg.DatabaseURL = ""
+	return cfg, nil
+}
+
 func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*pluginv1.ConfigureResponse, error) {
-	cfg := Config{TokenTTLHours: 168}
+	cfg := DefaultAppConfig()
 	for _, e := range req.GetConfig() {
 		if e.GetValue() == nil {
 			continue
 		}
 		m := e.GetValue().AsMap()
 		switch e.GetKey() {
+		case "database_url":
+			cfg.DatabaseURL = stringValue(m["value"], firstString(m))
 		case "token_secret":
 			cfg.TokenSecret = stringValue(m["value"], firstString(m))
 		case "standalone_http_listen":
@@ -72,31 +110,13 @@ func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 			cfg.AudioInstallationID = stringValue(m["value"], firstString(m))
 		}
 	}
-	if cfg.TokenSecret == "" {
-		secret, err := autoTokenSecret()
-		if err != nil {
-			return nil, err
-		}
-		cfg.TokenSecret = secret
-		cfg.TokenSecretGenerated = true
+	if cfg.DatabaseURL == "" {
+		return nil, fmt.Errorf("database_url is required")
 	}
-	if len(cfg.TokenSecret) < 32 {
-		return nil, fmt.Errorf("token_secret must be at least 32 characters")
-	}
-	if cfg.PublicBaseURL != "" {
-		u, err := url.Parse(cfg.PublicBaseURL)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return nil, fmt.Errorf("public_base_url must be an absolute URL")
-		}
-	}
-	if cfg.PublicPort < 0 || cfg.PublicPort > 65535 {
-		return nil, fmt.Errorf("public_port must be between 1 and 65535")
-	}
-	if cfg.PublicPort > 0 && cfg.StandaloneHTTPListen == "" {
-		cfg.StandaloneHTTPListen = fmt.Sprintf(":%d", cfg.PublicPort)
-	}
-	if cfg.TokenTTLHours < 1 {
-		cfg.TokenTTLHours = 168
+	var err error
+	cfg, err = NormalizeAppConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
 	if s.onConfig != nil {
 		if err := s.onConfig(cfg); err != nil {

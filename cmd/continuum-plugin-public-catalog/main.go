@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	pluginv1 "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginproto/continuum/plugin/v1"
 	publicmanifest "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/manifest"
@@ -26,6 +27,7 @@ import (
 	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/httproutes"
 	pluginrt "github.com/ContinuumApp/continuum-plugin-public-catalog/internal/runtime"
 	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/server"
+	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
 )
 
 //go:embed manifest.json
@@ -43,9 +45,32 @@ func main() {
 	var standaloneOnce sync.Once
 	var standaloneAddr atomic.Value
 	var standaloneSrv atomic.Pointer[http.Server]
+	var poolPtr atomic.Pointer[pgxpool.Pool]
 	htmlStore := server.NewFileHTMLStore(contentPath(".public-catalog-html-section"))
 
 	rt := pluginrt.New(manifest, func(cfg pluginrt.Config) error {
+		ctx := context.Background()
+		pcfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("parse database_url: %w", err)
+		}
+		if pcfg.MaxConns < 4 {
+			pcfg.MaxConns = 4
+		}
+		pool, err := pgxpool.NewWithConfig(ctx, pcfg)
+		if err != nil {
+			return fmt.Errorf("connect database: %w", err)
+		}
+		if err := store.Migrate(ctx, pool); err != nil {
+			pool.Close()
+			return fmt.Errorf("migrate: %w", err)
+		}
+		st := store.New(pool)
+		cfg, err = st.ImportLegacyConfig(ctx, cfg)
+		if err != nil {
+			pool.Close()
+			return fmt.Errorf("import app config: %w", err)
+		}
 		sources := []server.CatalogSource{}
 		if id, err := strconv.Atoi(cfg.EbookInstallationID); err == nil && id > 0 {
 			sources = append(sources, server.NewRuntimeHostSource("ebook", id))
@@ -67,6 +92,7 @@ func main() {
 			DefaultTokenTTLHour:  cfg.TokenTTLHours,
 			Sources:              sources,
 			HTMLStore:            htmlStore,
+			ConfigStore:          st,
 		}))
 
 		if addr := cfg.StandaloneHTTPListen; addr != "" {
@@ -95,6 +121,9 @@ func main() {
 					logger.Warn("standalone_http_listen changed; restart the plugin to apply", "current", prev, "requested", addr)
 				}
 			}
+		}
+		if old := poolPtr.Swap(pool); old != nil {
+			old.Close()
 		}
 		logger.Info("configured public-catalog plugin")
 		return nil

@@ -60,123 +60,19 @@
   ],
   "global_config_schema": [
     {
-      "key": "token_secret",
-      "title": "Catalog token secret",
-      "description": "Optional HMAC secret for signing public catalog access links. Leave empty to let the plugin generate and persist a secret automatically. If provided, use at least 32 random bytes.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+      "key": "database_url",
+      "title": "Postgres connection string",
+      "description": "DSN for the dedicated public_catalog schema (e.g. postgres://plugin_public_catalog:...@host:5432/continuum?search_path=public_catalog&sslmode=disable).",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"]}",
+      "required": true,
       "admin_form": {
         "fields": [
           {
             "key": "value",
-            "label": "Token secret",
+            "label": "Connection URL",
             "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "required": true,
             "secret": true
-          }
-        ]
-      }
-    },
-    {
-      "key": "standalone_http_listen",
-      "title": "Advanced listen address",
-      "description": "Optional advanced listener address, e.g. 127.0.0.1:8090. If set, this overrides Public port. Prefer loopback behind a reverse proxy.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
-      "admin_form": {
-        "fields": [
-          {
-            "key": "value",
-            "label": "Advanced listen address",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
-          }
-        ]
-      }
-    },
-    {
-      "key": "public_port",
-      "title": "Public port",
-      "description": "Optional standalone public website port, for example 8090. The plugin listens on :PORT when this is set and no advanced listen address is provided.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65535}}}",
-      "admin_form": {
-        "fields": [
-          {
-            "key": "value",
-            "label": "Public port",
-            "control": "ADMIN_FORM_CONTROL_NUMBER"
-          }
-        ]
-      }
-    },
-    {
-      "key": "public_base_url",
-      "title": "Public base URL",
-      "description": "Optional absolute URL used when generated catalog links are returned.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
-      "admin_form": {
-        "fields": [
-          {
-            "key": "value",
-            "label": "Public URL",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
-          }
-        ]
-      }
-    },
-    {
-      "key": "catalog_password",
-      "title": "Catalog password",
-      "description": "Shared password required to browse /catalog unless a permanent bypass token is used.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
-      "admin_form": {
-        "fields": [
-          {
-            "key": "value",
-            "label": "Catalog password",
-            "control": "ADMIN_FORM_CONTROL_PASSWORD",
-            "secret": true
-          }
-        ]
-      }
-    },
-    {
-      "key": "ad_html",
-      "title": "Initial trusted HTML",
-      "description": "Optional initial trusted operator HTML. After setup, edit the published landing-page HTML from the plugin admin section.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
-      "admin_form": {
-        "fields": [
-          {
-            "key": "value",
-            "label": "Initial trusted HTML",
-            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
-          }
-        ]
-      }
-    },
-    {
-      "key": "ebook_installation_id",
-      "title": "Ebook portal installation ID",
-      "description": "Optional Continuum plugin installation ID for continuum.ebooks. Enables ebook stats and browsing through authenticated inter-plugin HTTP.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
-      "admin_form": {
-        "fields": [
-          {
-            "key": "value",
-            "label": "Installation ID",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
-          }
-        ]
-      }
-    },
-    {
-      "key": "audiobook_installation_id",
-      "title": "Audiobook portal installation ID",
-      "description": "Optional Continuum plugin installation ID for continuum.audiobooks. Enables audiobook stats and browsing through authenticated inter-plugin HTTP.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
-      "admin_form": {
-        "fields": [
-          {
-            "key": "value",
-            "label": "Installation ID",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
           }
         ]
       }

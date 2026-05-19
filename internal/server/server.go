@@ -18,6 +18,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hashicorp/go-hclog"
 
+	pluginrt "github.com/ContinuumApp/continuum-plugin-public-catalog/internal/runtime"
+	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
@@ -41,6 +43,7 @@ type Deps struct {
 	StatsCacheTTL        time.Duration
 	Sources              []CatalogSource
 	HTMLStore            HTMLStore
+	ConfigStore          *store.Store
 
 	statsCache *statsCache
 }
@@ -62,8 +65,57 @@ func New(d Deps) http.Handler {
 	r.Post("/api/admin/catalog-token", requireAdmin(hCreateToken(d)))
 	r.Get("/api/admin/html-section", requireAdmin(hGetHTMLSection(d)))
 	r.Put("/api/admin/html-section", requireAdmin(hSaveHTMLSection(d)))
+	r.Get("/api/admin/config", requireAdmin(hGetConfig(d)))
+	r.Patch("/api/admin/config", requireAdmin(hUpdateConfig(d)))
 	r.Get("/admin", requireAdmin(hAdminPage(d)))
 	return r
+}
+
+func hGetConfig(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if d.ConfigStore == nil {
+			writeErr(w, http.StatusServiceUnavailable, "config_store_unavailable", "config storage is not configured")
+			return
+		}
+		cfg, err := d.ConfigStore.GetConfig(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "config_failed", err.Error())
+			return
+		}
+		cfg.TokenSecret = ""
+		cfg.CatalogPassword = ""
+		writeJSON(w, http.StatusOK, cfg)
+	}
+}
+
+func hUpdateConfig(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if d.ConfigStore == nil {
+			writeErr(w, http.StatusServiceUnavailable, "config_store_unavailable", "config storage is not configured")
+			return
+		}
+		cur, err := d.ConfigStore.GetConfig(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "config_failed", err.Error())
+			return
+		}
+		var req pluginrt.Config
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_json", "invalid JSON body")
+			return
+		}
+		if req.TokenSecret == "" {
+			req.TokenSecret = cur.TokenSecret
+		}
+		if req.CatalogPassword == "" {
+			req.CatalogPassword = cur.CatalogPassword
+		}
+		if err := d.ConfigStore.UpdateConfig(r.Context(), req); err != nil {
+			writeErr(w, http.StatusBadRequest, "config_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
 }
 
 func securityHeaders(next http.Handler) http.Handler {

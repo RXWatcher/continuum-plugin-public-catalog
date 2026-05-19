@@ -15,7 +15,7 @@ func TestConfigureGeneratesTokenSecretWhenMissing(t *testing.T) {
 		return nil
 	})
 
-	if _, err := s.Configure(t.Context(), nil); err != nil {
+	if _, err := s.Configure(t.Context(), configureRequest("database_url", map[string]any{"value": "postgres://x"})); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 }
@@ -74,7 +74,14 @@ func configureRequest(key string, value map[string]any) *pluginv1.ConfigureReque
 	if err != nil {
 		panic(err)
 	}
+	db, err := structpb.NewStruct(map[string]any{"value": "postgres://x"})
+	if err != nil {
+		panic(err)
+	}
 	return &pluginv1.ConfigureRequest{
-		Config: []*pluginv1.ConfigEntry{{Key: key, Value: v}},
+		Config: []*pluginv1.ConfigEntry{
+			{Key: "database_url", Value: db},
+			{Key: key, Value: v},
+		},
 	}
 }
