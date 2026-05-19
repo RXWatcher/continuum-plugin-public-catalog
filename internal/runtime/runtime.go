@@ -76,7 +76,6 @@ func NormalizeAppConfig(cfg Config) (Config, error) {
 	if cfg.TokenTTLHours < 1 {
 		cfg.TokenTTLHours = 168
 	}
-	cfg.DatabaseURL = ""
 	return cfg, nil
 }
 
