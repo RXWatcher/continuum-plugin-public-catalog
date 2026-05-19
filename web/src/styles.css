@@ -1,33 +1,7 @@
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   --radius: 0.75rem;
   --font-body: "Outfit", "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --background: #f4f4f6;
-  --foreground: #1a1a1e;
-  --card: #ffffff;
-  --primary: #1a1a1e;
-  --primary-foreground: #f4f4f6;
-  --secondary: #e8e8ec;
-  --secondary-foreground: #3a3a42;
-  --muted: #ebebef;
-  --muted-foreground: #78787f;
-  --accent: #e8e8ec;
-  --accent-foreground: #1a1a1e;
-  --border: #d8d8de;
-  --input: #e8e8ec;
-  --ring: #1a1a1e;
-  --sidebar: #eaeaee;
-  --sidebar-foreground: #1a1a1e;
-  --sidebar-accent: #dfdfe5;
-  --sidebar-accent-foreground: #1a1a1e;
-  --sidebar-border: #d0d0d8;
-  --surface: #ebebef;
-  --surface-hover: #e0e0e6;
-  --surface-raised: #ffffff;
-}
-
-[data-theme="midnight-cinema"] {
-  color-scheme: dark;
   --background: #141417;
   --foreground: #e8e8ec;
   --card: #1c1c20;
@@ -50,6 +24,36 @@
   --surface: #1c1c20;
   --surface-hover: #232328;
   --surface-raised: #28282e;
+}
+
+[data-theme="midnight-cinema"] {
+  color-scheme: dark;
+}
+
+[data-theme="cinema-light"] {
+  color-scheme: light;
+  --background: #f4f4f6;
+  --foreground: #1a1a1e;
+  --card: #ffffff;
+  --primary: #1a1a1e;
+  --primary-foreground: #f4f4f6;
+  --secondary: #e8e8ec;
+  --secondary-foreground: #3a3a42;
+  --muted: #ebebef;
+  --muted-foreground: #78787f;
+  --accent: #e8e8ec;
+  --accent-foreground: #1a1a1e;
+  --border: #d8d8de;
+  --input: #e8e8ec;
+  --ring: #1a1a1e;
+  --sidebar: #eaeaee;
+  --sidebar-foreground: #1a1a1e;
+  --sidebar-accent: #dfdfe5;
+  --sidebar-accent-foreground: #1a1a1e;
+  --sidebar-border: #d0d0d8;
+  --surface: #ebebef;
+  --surface-hover: #e0e0e6;
+  --surface-raised: #ffffff;
 }
 
 [data-theme="cobalt-studio"] {
@@ -154,7 +158,7 @@ p {
   top: 0;
   z-index: 10;
   display: flex;
-  min-height: 4rem;
+  min-height: 4.5rem;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
@@ -174,14 +178,57 @@ p {
   color: var(--foreground);
 }
 
-.top-bar > div {
+.top-bar-links,
+.top-bar-controls {
   display: flex;
+  align-items: center;
   gap: 1rem;
 }
 
 .brand {
   color: var(--foreground) !important;
   font-weight: 780 !important;
+}
+
+.top-bar-links {
+  margin-left: auto;
+}
+
+.theme-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0.2rem;
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--foreground) 5%, transparent);
+}
+
+.theme-toggle button {
+  min-width: 4.25rem;
+  min-height: 2.15rem;
+  padding: 0.45rem 0.8rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 720;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.theme-toggle button:hover {
+  color: var(--foreground);
+}
+
+.theme-toggle button.active {
+  background: var(--foreground);
+  color: var(--background);
+}
+
+.theme-toggle button:active {
+  transform: scale(0.98);
 }
 
 .home-layout,
@@ -1157,6 +1204,21 @@ select:focus,
 }
 
 @media (max-width: 980px) {
+  .top-bar {
+    flex-wrap: wrap;
+    padding-bottom: 0.6rem;
+  }
+
+  .top-bar-links {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .top-bar-controls {
+    margin-left: auto;
+  }
+
   .home-layout,
   .library-header,
   .detail-body {
@@ -1214,6 +1276,23 @@ select:focus,
 
   h1 {
     font-size: clamp(2.7rem, 15vw, 4rem);
+  }
+
+  .top-bar {
+    gap: 0.75rem;
+  }
+
+  .top-bar-links {
+    justify-content: space-between;
+  }
+
+  .top-bar-controls,
+  .theme-toggle {
+    width: 100%;
+  }
+
+  .theme-toggle button {
+    min-width: 0;
   }
 
   .filter-panel,

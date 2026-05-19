@@ -83,6 +83,12 @@ type CatalogMediaItem struct {
 	tvdbID         string
 }
 
+type CatalogMediaImagePaths struct {
+	MediaID      string
+	PosterPath   string
+	BackdropPath string
+}
+
 type CatalogItemDetail struct {
 	ContentID        string           `json:"contentId"`
 	Type             string           `json:"type"`
@@ -682,6 +688,43 @@ func (s *Store) cachedProviderImage(ctx context.Context, cacheKey string) string
 		return ""
 	}
 	return out
+}
+
+func (s *Store) CatalogMediaImagePaths(ctx context.Context, mediaIDs []string) (map[string]CatalogMediaImagePaths, error) {
+	ids := cleanStrings(mediaIDs)
+	if len(ids) == 0 {
+		return map[string]CatalogMediaImagePaths{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH wanted AS (
+			SELECT unnest($1::text[]) AS content_id
+		)
+		SELECT
+			w.content_id,
+			COALESCE(e.still_path, s.poster_path, mi.poster_path, '') AS poster_path,
+			COALESCE(series_mi.backdrop_path, mi.backdrop_path, '') AS backdrop_path
+		FROM wanted w
+		LEFT JOIN public.media_items mi ON mi.content_id = w.content_id
+		LEFT JOIN public.seasons s ON s.content_id = w.content_id
+		LEFT JOIN public.episodes e ON e.content_id = w.content_id
+		LEFT JOIN public.media_items series_mi ON series_mi.content_id = COALESCE(e.series_id, s.series_id)
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("query catalog image paths: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]CatalogMediaImagePaths, len(ids))
+	for rows.Next() {
+		var item CatalogMediaImagePaths
+		if err := rows.Scan(&item.MediaID, &item.PosterPath, &item.BackdropPath); err != nil {
+			return nil, fmt.Errorf("scan catalog image paths: %w", err)
+		}
+		out[item.MediaID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *Store) CatalogItemDetail(ctx context.Context, contentID string, libraryIDs []string) (*CatalogItemDetail, error) {

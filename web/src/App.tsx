@@ -152,6 +152,11 @@ type CatalogBrowserState = {
 
 type LibraryMode = "movie" | "tv" | "mixed" | "unknown";
 
+const PUBLIC_THEME_STORAGE_KEY = "continuum.publicCatalog.theme";
+const DARK_THEME = "midnight-cinema";
+const LIGHT_THEME = "cinema-light";
+const supportedThemes = new Set([DARK_THEME, LIGHT_THEME, "cobalt-studio", "oxblood-noir", "evergreen-studio"]);
+
 const mediaLabels: Record<string, string> = {
   movie: "Movie",
   tv: "Series",
@@ -163,7 +168,7 @@ const mediaLabels: Record<string, string> = {
 
 const fallbackBootstrap: Bootstrap = {
   mode: "landing",
-  theme: "cinema-light",
+  theme: DARK_THEME,
   catalogHref: "catalog",
   customHTML: "",
   authRequired: false,
@@ -192,17 +197,32 @@ function readBootstrap(): Bootstrap {
 }
 
 const bootstrap = readBootstrap();
-document.documentElement.dataset.theme = bootstrap.theme || "cinema-light";
+const initialTheme = resolveThemePreference(bootstrap.theme);
+document.documentElement.dataset.theme = initialTheme;
 
 function App() {
+  const [theme, setTheme] = useState(initialTheme);
   const [authorized, setAuthorized] = useState(!bootstrap.authRequired);
-  if (!authorized) return <AuthPage onAuthorized={() => setAuthorized(true)} />;
-  if (bootstrap.mode === "detail") return <DetailPage bootstrap={bootstrap} />;
-  if (bootstrap.mode === "catalog") return <CatalogPage bootstrap={bootstrap} />;
-  return <LandingPage bootstrap={bootstrap} />;
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(PUBLIC_THEME_STORAGE_KEY, theme);
+    } catch {}
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("theme") === theme) return;
+    params.set("theme", theme);
+    const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}`;
+    window.history.replaceState(null, "", next);
+  }, [theme]);
+
+  if (!authorized) return <AuthPage onAuthorized={() => setAuthorized(true)} theme={theme} onThemeChange={setTheme} />;
+  if (bootstrap.mode === "detail") return <DetailPage bootstrap={bootstrap} theme={theme} onThemeChange={setTheme} />;
+  if (bootstrap.mode === "catalog") return <CatalogPage bootstrap={bootstrap} theme={theme} onThemeChange={setTheme} />;
+  return <LandingPage bootstrap={bootstrap} theme={theme} onThemeChange={setTheme} />;
 }
 
-function AuthPage({ onAuthorized }: { onAuthorized: () => void }) {
+function AuthPage({ onAuthorized, theme, onThemeChange }: { onAuthorized: () => void; theme: string; onThemeChange: (theme: string) => void }) {
   const [passwordError, setPasswordError] = useState("");
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -225,6 +245,7 @@ function AuthPage({ onAuthorized }: { onAuthorized: () => void }) {
 
   return (
     <main className="app-shell auth-shell">
+      <TopBar theme={theme} onThemeChange={onThemeChange} />
       <section className="auth-panel">
         <p className="eyebrow">Public catalog</p>
         <h1>Catalog access</h1>
@@ -244,7 +265,7 @@ function AuthPage({ onAuthorized }: { onAuthorized: () => void }) {
   );
 }
 
-function LandingPage({ bootstrap }: { bootstrap: Bootstrap }) {
+function LandingPage({ bootstrap, theme, onThemeChange }: { bootstrap: Bootstrap; theme: string; onThemeChange: (theme: string) => void }) {
   const { stats, status } = useStats(bootstrap.initialStats || null);
   const libraries = (stats?.libraryCounts || []).filter((library) => library.count > 0);
   const total = stats?.totalItems ?? 0;
@@ -253,7 +274,7 @@ function LandingPage({ bootstrap }: { bootstrap: Bootstrap }) {
 
   return (
     <main className="app-shell">
-      <TopBar />
+      <TopBar theme={theme} onThemeChange={onThemeChange} />
       <section className="home-layout">
         <div className="home-copy">
           <p className="eyebrow">Public catalog</p>
@@ -304,10 +325,10 @@ function LandingPage({ bootstrap }: { bootstrap: Bootstrap }) {
   );
 }
 
-function CatalogPage({ bootstrap }: { bootstrap: Bootstrap }) {
+function CatalogPage({ bootstrap, theme, onThemeChange }: { bootstrap: Bootstrap; theme: string; onThemeChange: (theme: string) => void }) {
   return (
     <main className="app-shell catalog-shell">
-      <TopBar />
+      <TopBar theme={theme} onThemeChange={onThemeChange} />
       <CatalogBrowser bootstrap={bootstrap} />
     </main>
   );
@@ -643,7 +664,7 @@ function CatalogBrowser({ bootstrap }: { bootstrap: Bootstrap }) {
   );
 }
 
-function DetailPage({ bootstrap }: { bootstrap: Bootstrap }) {
+function DetailPage({ bootstrap, theme, onThemeChange }: { bootstrap: Bootstrap; theme: string; onThemeChange: (theme: string) => void }) {
   const id = decodeURIComponent(window.location.pathname.split("/item/")[1] || "");
   const params = new URLSearchParams(window.location.search);
   const libraryId = params.get("libraryId") || "";
@@ -718,7 +739,7 @@ function DetailPage({ bootstrap }: { bootstrap: Bootstrap }) {
   if (loading) {
     return (
       <main className="app-shell">
-        <TopBar />
+        <TopBar theme={theme} onThemeChange={onThemeChange} />
         <div className="detail-skeleton" />
       </main>
     );
@@ -727,7 +748,7 @@ function DetailPage({ bootstrap }: { bootstrap: Bootstrap }) {
   if (error || !detail) {
     return (
       <main className="app-shell">
-        <TopBar />
+        <TopBar theme={theme} onThemeChange={onThemeChange} />
         <section className="empty-state detail-empty">{error || "Item not found."}</section>
       </main>
     );
@@ -742,7 +763,7 @@ function DetailPage({ bootstrap }: { bootstrap: Bootstrap }) {
 
   return (
     <main className="detail-shell">
-      <TopBar />
+      <TopBar theme={theme} onThemeChange={onThemeChange} />
       {detail.type === "movie" ? (
         <MovieDetail detail={detail} backHref={backHref} />
       ) : detail.type === "series" ? (
@@ -1081,18 +1102,29 @@ function StatsSection({ stats, status }: { stats: Stats | null; status: string }
   );
 }
 
-function TopBar() {
+function TopBar({ theme, onThemeChange }: { theme: string; onThemeChange: (theme: string) => void }) {
   const params = new URLSearchParams(window.location.search);
   const libraryId = params.get("libraryId") || "";
   const browseHref = libraryId ? `catalog?libraryId=${encodeURIComponent(libraryId)}` : "catalog";
+  const darkActive = theme !== LIGHT_THEME;
   return (
     <nav className="top-bar" aria-label="Public catalog">
       <a className="brand" href={withToken("/", bootstrap.token)}>
         Continuum Library
       </a>
-      <div>
+      <div className="top-bar-links">
         <a href={withToken("/", bootstrap.token)}>Home</a>
         <a href={withToken(browseHref, bootstrap.token)}>Browse</a>
+      </div>
+      <div className="top-bar-controls">
+        <div className="theme-toggle" role="group" aria-label="Theme mode">
+          <button className={darkActive ? "active" : ""} onClick={() => onThemeChange(DARK_THEME)} type="button" aria-pressed={darkActive}>
+            Dark
+          </button>
+          <button className={!darkActive ? "active" : ""} onClick={() => onThemeChange(LIGHT_THEME)} type="button" aria-pressed={!darkActive}>
+            Light
+          </button>
+        </div>
       </div>
     </nav>
   );
@@ -1451,9 +1483,14 @@ function tokenQuery(token: string) {
 }
 
 function withToken(path: string, token: string) {
-  if (!token) return path;
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}token=${encodeURIComponent(token)}`;
+  const [pathWithoutHash, hash = ""] = path.split("#", 2);
+  const [base, query = ""] = pathWithoutHash.split("?", 2);
+  const params = new URLSearchParams(query);
+  if (token) params.set("token", token);
+  const theme = currentTheme();
+  if (theme) params.set("theme", theme);
+  const nextQuery = params.toString();
+  return `${base}${nextQuery ? `?${nextQuery}` : ""}${hash ? `#${hash}` : ""}`;
 }
 
 function buildItemHref(id: string, token: string, libraryId: string) {
@@ -1475,5 +1512,25 @@ function setSearchParam(params: URLSearchParams, key: string, value: string) {
 
 const sampleCustomHTML =
   '<div class="custom-html-sample"><h3>Featured note</h3><p>This area is the custom HTML section for a named public page. It can hold event copy, access notes, or curated instructions while the rest of the page keeps the Continuum library experience.</p></div>';
+
+function normalizeTheme(theme?: string | null) {
+  if (!theme) return "";
+  const next = theme.trim();
+  return supportedThemes.has(next) ? next : "";
+}
+
+function currentTheme() {
+  return normalizeTheme(document.documentElement.dataset.theme) || resolveThemePreference(bootstrap.theme);
+}
+
+function resolveThemePreference(bootstrapTheme: string) {
+  const requested = normalizeTheme(new URLSearchParams(window.location.search).get("theme"));
+  if (requested) return requested;
+  try {
+    const saved = normalizeTheme(window.localStorage.getItem(PUBLIC_THEME_STORAGE_KEY));
+    if (saved) return saved;
+  } catch {}
+  return normalizeTheme(bootstrapTheme) || DARK_THEME;
+}
 
 createRoot(document.getElementById("root")!).render(<App />);

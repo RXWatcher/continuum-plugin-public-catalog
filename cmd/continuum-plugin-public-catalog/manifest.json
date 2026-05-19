@@ -31,6 +31,12 @@
       "access": "public"
     },
     {
+      "id": "item_page",
+      "method": "GET",
+      "path": "/item/*",
+      "access": "public"
+    },
+    {
       "id": "public_api",
       "method": "*",
       "path": "/api/public/*",

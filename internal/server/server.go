@@ -34,6 +34,7 @@ var publicSPA embed.FS
 type Host interface {
 	ListLibraryMedia(ctx context.Context, req runtimehost.ListLibraryMediaRequest) (*runtimehost.ListLibraryMediaResponse, error)
 	GetCatalogStats(ctx context.Context, libraryIDs []string) (*runtimehost.CatalogStats, error)
+	ResolveCatalogImageURLs(ctx context.Context, paths []string, variant string) (map[string]string, error)
 	CallPluginHTTP(ctx context.Context, req runtimehost.CallPluginHTTPRequest) (*runtimehost.CallPluginHTTPResponse, error)
 	CallPluginJSON(ctx context.Context, req runtimehost.CallPluginJSONRequest) error
 }
@@ -412,7 +413,7 @@ func hPublicAsset() http.HandlerFunc {
 
 func writePublicApp(w http.ResponseWriter, r *http.Request, bootstrap publicBootstrap, status int) {
 	if bootstrap.Theme == "" || bootstrap.Theme == "default" {
-		bootstrap.Theme = "cinema-light"
+		bootstrap.Theme = "midnight-cinema"
 	}
 	if bootstrap.CatalogHref == "" {
 		bootstrap.CatalogHref = "catalog"
@@ -429,6 +430,11 @@ func writePublicApp(w http.ResponseWriter, r *http.Request, bootstrap publicBoot
 	}
 	index = bytes.Replace(index, []byte("%PUBLIC_CATALOG_BOOTSTRAP%"), rawBootstrap, 1)
 	index = bytes.Replace(index, []byte(`<html lang="en">`), []byte(`<html lang="en" data-theme="`+html.EscapeString(bootstrap.Theme)+`">`), 1)
+	assetBase := "./assets/"
+	if strings.HasPrefix(r.URL.Path, "/item/") {
+		assetBase = "../assets/"
+	}
+	index = bytes.ReplaceAll(index, []byte(`./assets/`), []byte(assetBase))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write(index)
@@ -750,27 +756,65 @@ func overlayCatalogMediaImages(ctx context.Context, d Deps, req runtimehost.List
 	if len(items) == 0 {
 		return
 	}
+	if d.ConfigStore == nil {
+		return
+	}
 	host := currentHost(d)
 	if host == nil {
 		return
 	}
-	resp, err := host.ListLibraryMedia(ctx, req)
-	if err != nil || resp == nil || len(resp.Items) == 0 {
-		return
-	}
-	byID := make(map[string]runtimehost.CatalogMediaItem, len(resp.Items))
-	for _, item := range resp.Items {
-		if item.MediaID != "" {
-			byID[item.MediaID] = item
+	missing := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.MediaID == "" {
+			continue
+		}
+		if item.PosterURL == "" || item.BackdropURL == "" {
+			missing = append(missing, item.MediaID)
 		}
 	}
+	if len(missing) == 0 {
+		return
+	}
+	rawPaths, err := d.ConfigStore.CatalogMediaImagePaths(ctx, missing)
+	if err != nil || len(rawPaths) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(rawPaths)*2)
+	for _, item := range items {
+		if item.MediaID == "" {
+			continue
+		}
+		raw, ok := rawPaths[item.MediaID]
+		if !ok {
+			continue
+		}
+		if item.PosterURL == "" && strings.TrimSpace(raw.PosterPath) != "" {
+			paths = append(paths, raw.PosterPath)
+		}
+		if item.BackdropURL == "" && strings.TrimSpace(raw.BackdropPath) != "" {
+			paths = append(paths, raw.BackdropPath)
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	resolved, err := host.ResolveCatalogImageURLs(ctx, paths, "card")
+	if err != nil || len(resolved) == 0 {
+		return
+	}
 	for i := range items {
-		if hostItem, ok := byID[items[i].MediaID]; ok {
-			if hostItem.PosterURL != "" {
-				items[i].PosterURL = hostItem.PosterURL
+		raw, ok := rawPaths[items[i].MediaID]
+		if !ok {
+			continue
+		}
+		if items[i].PosterURL == "" {
+			if value := strings.TrimSpace(resolved[raw.PosterPath]); value != "" {
+				items[i].PosterURL = value
 			}
-			if hostItem.BackdropURL != "" {
-				items[i].BackdropURL = hostItem.BackdropURL
+		}
+		if items[i].BackdropURL == "" {
+			if value := strings.TrimSpace(resolved[raw.BackdropPath]); value != "" {
+				items[i].BackdropURL = value
 			}
 		}
 	}

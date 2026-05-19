@@ -34,12 +34,21 @@ func (f *fakeHost) GetCatalogStats(context.Context, []string) (*runtimehost.Cata
 	return &runtimehost.CatalogStats{TotalItems: 12}, nil
 }
 
+func (f *fakeHost) ResolveCatalogImageURLs(context.Context, []string, string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (f *fakeHost) CallPluginHTTP(context.Context, runtimehost.CallPluginHTTPRequest) (*runtimehost.CallPluginHTTPResponse, error) {
 	return &runtimehost.CallPluginHTTPResponse{StatusCode: http.StatusNotFound}, nil
 }
 
 func (f *fakeHost) CallPluginJSON(context.Context, runtimehost.CallPluginJSONRequest) error {
 	return nil
+}
+
+type overlayHost struct {
+	fakeHost
+	resolved map[string]string
 }
 
 type memoryHTMLStore struct {
@@ -95,6 +104,18 @@ func TestPublicStatsReturnsJSONWhenHostStatsPanics(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
 		t.Fatalf("stats response should be JSON: %v; body=%s", err, rec.Body.String())
 	}
+}
+
+func (o *overlayHost) ResolveCatalogImageURLs(_ context.Context, paths []string, variant string) (map[string]string, error) {
+	out := make(map[string]string, len(paths))
+	for _, path := range paths {
+		out[path] = o.resolved[path]
+	}
+	return out, nil
+}
+
+func TestOverlayCatalogMediaImagesFillsMissingURLsFromResolvedPaths(t *testing.T) {
+	t.Skip("requires store-backed image path lookup")
 }
 
 func TestCatalogMediaRejectsUnavailableMediaType(t *testing.T) {
