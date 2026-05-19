@@ -48,8 +48,10 @@ func main() {
 	var poolPtr atomic.Pointer[pgxpool.Pool]
 	htmlStore := server.NewFileHTMLStore(contentPath(".public-catalog-html-section"))
 
-	rt := pluginrt.New(manifest, func(cfg pluginrt.Config) error {
+	var applyConfig func(pluginrt.Config) error
+	applyConfig = func(cfg pluginrt.Config) error {
 		ctx := context.Background()
+		databaseURL := cfg.DatabaseURL
 		pcfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 		if err != nil {
 			return fmt.Errorf("parse database_url: %w", err)
@@ -71,6 +73,7 @@ func main() {
 			pool.Close()
 			return fmt.Errorf("import app config: %w", err)
 		}
+		cfg.DatabaseURL = databaseURL
 		sources := []server.CatalogSource{}
 		if id, err := strconv.Atoi(cfg.EbookInstallationID); err == nil && id > 0 {
 			sources = append(sources, server.NewRuntimeHostSource("ebook", id))
@@ -82,6 +85,7 @@ func main() {
 			Host: func() server.Host {
 				return sdkruntime.Host()
 			},
+			DatabaseURL:          cfg.DatabaseURL,
 			Logger:               logger,
 			TokenSecret:          cfg.TokenSecret,
 			TokenSecretGenerated: cfg.TokenSecretGenerated,
@@ -93,6 +97,7 @@ func main() {
 			Sources:              sources,
 			HTMLStore:            htmlStore,
 			ConfigStore:          st,
+			ApplyConfig:          applyConfig,
 		}))
 
 		if addr := cfg.StandaloneHTTPListen; addr != "" {
@@ -127,7 +132,8 @@ func main() {
 		}
 		logger.Info("configured public-catalog plugin")
 		return nil
-	})
+	}
+	rt := pluginrt.New(manifest, applyConfig)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

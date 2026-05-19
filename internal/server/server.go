@@ -1,11 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
+	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -23,6 +28,9 @@ import (
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
+//go:embed public/dist/* public/dist/assets/*
+var publicSPA embed.FS
+
 type Host interface {
 	ListLibraryMedia(ctx context.Context, req runtimehost.ListLibraryMediaRequest) (*runtimehost.ListLibraryMediaResponse, error)
 	GetCatalogStats(ctx context.Context, libraryIDs []string) (*runtimehost.CatalogStats, error)
@@ -32,6 +40,7 @@ type Host interface {
 
 type Deps struct {
 	Host                 func() Host
+	DatabaseURL          string
 	Logger               hclog.Logger
 	TokenSecret          string
 	TokenSecretGenerated bool
@@ -44,8 +53,10 @@ type Deps struct {
 	Sources              []CatalogSource
 	HTMLStore            HTMLStore
 	ConfigStore          *store.Store
+	ApplyConfig          func(pluginrt.Config) error
 
-	statsCache *statsCache
+	statsCache   *statsCache
+	catalogCache *catalogCache
 }
 
 func New(d Deps) http.Handler {
@@ -53,16 +64,25 @@ func New(d Deps) http.Handler {
 		d.StatsCacheTTL = 30 * time.Second
 	}
 	d.statsCache = &statsCache{ttl: d.StatsCacheTTL}
+	d.catalogCache = newCatalogCache(2 * time.Minute)
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
 
 	r.Get("/", hLanding(d))
 	r.Get("/catalog", hCatalogPage(d))
+	r.Get("/item/{id}", hItemPage(d))
+	r.Get("/assets/*", hPublicAsset())
 	r.Get("/api/public/stats", hStats(d))
 	r.Post("/api/public/catalog-login", hCatalogLogin(d))
 	r.Get("/api/catalog/media", hCatalogMedia(d))
+	r.Get("/api/catalog/filters", hCatalogFilters(d))
+	r.Get("/api/catalog/items/{id}", hCatalogItemDetail(d))
+	r.Get("/api/catalog/items/{id}/seasons", hCatalogSeriesSeasons(d))
+	r.Get("/api/catalog/series/{id}/seasons/{season}/episodes", hCatalogSeasonEpisodes(d))
 	r.Post("/api/admin/catalog-token", requireAdmin(hCreateToken(d)))
+	r.Get("/api/admin/catalog-links", requireAdmin(hListCatalogLinks(d)))
+	r.Delete("/api/admin/catalog-links/{id}", requireAdmin(hDeleteCatalogLink(d)))
 	r.Get("/api/admin/html-section", requireAdmin(hGetHTMLSection(d)))
 	r.Put("/api/admin/html-section", requireAdmin(hSaveHTMLSection(d)))
 	r.Get("/api/admin/config", requireAdmin(hGetConfig(d)))
@@ -110,9 +130,30 @@ func hUpdateConfig(d Deps) http.HandlerFunc {
 		if req.CatalogPassword == "" {
 			req.CatalogPassword = cur.CatalogPassword
 		}
-		if err := d.ConfigStore.UpdateConfig(r.Context(), req); err != nil {
+		next, err := pluginrt.NormalizeAppConfig(req)
+		if err != nil {
 			writeErr(w, http.StatusBadRequest, "config_failed", err.Error())
 			return
+		}
+		if liveListenerChange(cur, next) {
+			writeErr(w, http.StatusBadRequest, "config_failed", "changing the public listener requires a plugin restart; keep the current listener settings or restart after updating them")
+			return
+		}
+		if err := d.ConfigStore.UpdateConfig(r.Context(), next); err != nil {
+			writeErr(w, http.StatusBadRequest, "config_failed", err.Error())
+			return
+		}
+		cfg, err := d.ConfigStore.GetConfig(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "config_failed", err.Error())
+			return
+		}
+		if d.ApplyConfig != nil {
+			cfg.DatabaseURL = d.DatabaseURL
+			if err := d.ApplyConfig(cfg); err != nil {
+				writeErr(w, http.StatusBadRequest, "config_failed", err.Error())
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}
@@ -154,92 +195,244 @@ func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 
 func hLanding(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		stats, _ := hostStats(r.Context(), d, nil)
-		total := 0
-		if stats != nil {
-			total = stats.TotalItems
+		var customHTML string
+		catalogHref := "catalog"
+		if name := strings.TrimSpace(r.URL.Query().Get("page")); name != "" && d.ConfigStore != nil {
+			if link, ok, err := d.ConfigStore.GetCatalogLinkByName(r.Context(), name); err == nil && ok {
+				customHTML = link.HTML
+				if strings.TrimSpace(link.URL) != "" {
+					catalogHref = link.URL
+				}
+			}
 		}
-		writeHTML(w, `<!doctype html>
-<html lang="en" data-theme="`+adminTheme(r)+`">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Media Catalog</title>
-<style>`+css()+`</style>
-</head>
-<body>
-<main class="shell">
-  <section class="hero">
-    <div>
-      <p class="eyebrow">Public catalog</p>
-      <h1>See what is available</h1>
-      <p class="lead">Browse current library statistics and featured access information.</p>
-    </div>
-    <div class="stat"><span>`+strconv.Itoa(total)+`</span><small>items available</small></div>
-  </section>
-  <section class="panel" id="stats"><h2>Stats</h2>`+statsHTML(stats)+`</section>
-  <section class="panel ad"><h2>Featured</h2>`+adHTML(publishedHTML(r.Context(), d))+`</section>
-</main>
-</body>
-</html>`)
+		libraryIDs, mediaTypes := []string(nil), []string(nil)
+		if claims, ok := catalogClaimsFromRequest(d, r); ok {
+			libraryIDs = claims.LibraryIDs
+			mediaTypes = claims.MediaTypes
+		}
+		stats, _ := publicCatalogStats(r.Context(), d, libraryIDs)
+		stats = scopeCatalogStats(stats, mediaTypes)
+		writePublicApp(w, r, publicBootstrap{
+			Mode:         "landing",
+			Theme:        adminTheme(r),
+			CatalogHref:  catalogHref,
+			CustomHTML:   adHTML(defaultString(customHTML, publishedHTML(r.Context(), d))),
+			InitialStats: stats,
+		}, http.StatusOK)
 	}
 }
 
 func hCatalogPage(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := catalogClaimsFromRequest(d, r); !ok {
-			writeCatalogPasswordPage(w, r)
-			return
+		claims, ok := catalogClaimsFromRequest(d, r)
+		status := http.StatusOK
+		if !ok {
+			status = http.StatusUnauthorized
 		}
-		writeHTML(w, `<!doctype html>
-<html lang="en" data-theme="`+adminTheme(r)+`">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Catalog</title>
-<style>`+css()+`</style>
-</head>
-<body>
-<main class="shell">
-  <section class="toolbar">
-    <input id="q" type="search" placeholder="Search catalog">
-    <select id="type"><option value="">All media</option><option value="movie">Movies</option><option value="tv">TV</option><option value="episode">Episodes</option><option value="audiobook">Audiobooks</option><option value="ebook">Ebooks</option></select>
-    <select id="sort"><option value="title">Title</option><option value="year">Year</option><option value="added_at">Recently added</option><option value="rating">Rating</option></select>
-  </section>
-  <section id="results" class="grid"></section>
-  <button id="more" class="button" hidden>Load more</button>
-</main>
-<script>
-const token = new URLSearchParams(location.search).get('token');
-let next = "";
-async function load(reset=false) {
-  if (reset) { next = ""; document.getElementById('results').innerHTML = ""; }
-  const p = new URLSearchParams({q: q.value, sort: sort.value, page_size: "48"});
-  if (token) p.set("token", token);
-  if (type.value) p.set("media_type", type.value);
-  if (next) p.set("page_token", next);
-  const res = await fetch("api/catalog/media?" + p.toString());
-  if (!res.ok) { document.getElementById('results').textContent = "Catalog unavailable"; return; }
-  const data = await res.json();
-  next = data.nextPageToken || "";
-  more.hidden = !next;
-  for (const it of data.items || []) {
-    const card = document.createElement("article");
-    card.className = "card";
-    card.innerHTML = '<div class="poster">' + (it.posterUrl ? '<img src="'+esc(it.posterUrl)+'" alt="">' : '') + '</div><div class="body"><h3>'+esc(it.title)+'</h3><p>'+esc([it.mediaType, it.year].filter(Boolean).join(" • "))+'</p><p>'+esc((it.genres||[]).slice(0,3).join(", "))+'</p></div>';
-    results.appendChild(card);
-  }
-}
-function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-q.addEventListener("input", () => { clearTimeout(window.t); window.t=setTimeout(()=>load(true), 250); });
-type.addEventListener("change", () => load(true));
-sort.addEventListener("change", () => load(true));
-more.addEventListener("click", () => load(false));
-load(true);
-</script>
-</body>
-</html>`)
+		stats, _ := publicCatalogStats(r.Context(), d, claims.LibraryIDs)
+		stats = scopeCatalogStats(stats, claims.MediaTypes)
+		bootstrap := publicBootstrap{
+			Mode:         "catalog",
+			Theme:        adminTheme(r),
+			AuthRequired: !ok,
+			Token:        strings.TrimSpace(r.URL.Query().Get("token")),
+			InitialStats: stats,
+		}
+		if ok && d.ConfigStore != nil && stats != nil {
+			if libraryID := initialCatalogLibraryID(stats, claims.LibraryIDs, r.URL.Query().Get("libraryId")); libraryID != "" {
+				bootstrap.InitialLibraryID = libraryID
+				storeMediaTypes := normalizeStoreMediaTypes(claims.MediaTypes)
+				mediaKey := catalogMediaCacheKey([]string{libraryID}, claims.MediaTypes, "", "", 0, 0, "added_at", true, 60, "")
+				if resp, hit := d.catalogCache.getMedia(mediaKey); hit {
+					bootstrap.InitialItems = resp.Items
+					bootstrap.InitialNextPageToken = resp.NextPageToken
+					bootstrap.InitialTotalCount = resp.TotalCount
+				} else if resp, err := d.ConfigStore.CatalogMedia(r.Context(), store.CatalogMediaQuery{
+					LibraryIDs: []string{libraryID},
+					MediaTypes: storeMediaTypes,
+					Sort:       "added_at",
+					Descending: true,
+					PageSize:   60,
+				}); err == nil && resp != nil {
+					overlayCatalogMediaImages(r.Context(), d, runtimehost.ListLibraryMediaRequest{
+						LibraryIDs: []string{libraryID},
+						MediaTypes: claims.MediaTypes,
+						Sort:       "added_at",
+						Descending: true,
+						PageSize:   60,
+					}, resp.Items)
+					d.catalogCache.setMedia(mediaKey, resp)
+					bootstrap.InitialItems = resp.Items
+					bootstrap.InitialNextPageToken = resp.NextPageToken
+					bootstrap.InitialTotalCount = resp.TotalCount
+				}
+				filterKey := catalogFiltersCacheKey([]string{libraryID}, claims.MediaTypes)
+				if filters, hit := d.catalogCache.getFilters(filterKey); hit {
+					bootstrap.InitialFilters = filters
+				} else if filters, err := d.ConfigStore.CatalogFilters(r.Context(), []string{libraryID}, storeMediaTypes); err == nil && filters != nil {
+					d.catalogCache.setFilters(filterKey, filters)
+					bootstrap.InitialFilters = filters
+				}
+			}
+		}
+		writePublicApp(w, r, bootstrap, status)
 	}
+}
+
+func hItemPage(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, ok := catalogClaimsFromRequest(d, r)
+		status := http.StatusOK
+		if !ok {
+			status = http.StatusUnauthorized
+		}
+		stats, _ := publicCatalogStats(r.Context(), d, nil)
+		writePublicApp(w, r, publicBootstrap{
+			Mode:         "detail",
+			Theme:        adminTheme(r),
+			AuthRequired: !ok,
+			Token:        strings.TrimSpace(r.URL.Query().Get("token")),
+			InitialStats: stats,
+		}, status)
+	}
+}
+
+type publicBootstrap struct {
+	Mode                 string                   `json:"mode"`
+	Theme                string                   `json:"theme"`
+	CatalogHref          string                   `json:"catalogHref"`
+	CustomHTML           string                   `json:"customHTML"`
+	AuthRequired         bool                     `json:"authRequired"`
+	Token                string                   `json:"token"`
+	InitialStats         *store.CatalogStats      `json:"initialStats,omitempty"`
+	InitialLibraryID     string                   `json:"initialLibraryId,omitempty"`
+	InitialItems         []store.CatalogMediaItem `json:"initialItems,omitempty"`
+	InitialNextPageToken string                   `json:"initialNextPageToken,omitempty"`
+	InitialTotalCount    int                      `json:"initialTotalCount,omitempty"`
+	InitialFilters       *store.CatalogFilters    `json:"initialFilters,omitempty"`
+}
+
+func publicCatalogPreview(ctx context.Context, d Deps, r *http.Request, limit int) []runtimehost.CatalogMediaItem {
+	claims, ok := catalogClaimsFromRequest(d, r)
+	if !ok {
+		return nil
+	}
+	host := currentHost(d)
+	if host == nil {
+		return nil
+	}
+	req := runtimehost.ListLibraryMediaRequest{
+		LibraryIDs: claims.LibraryIDs,
+		MediaTypes: claims.MediaTypes,
+		Sort:       "added_at",
+		Descending: true,
+		PageSize:   limit,
+	}
+	resp, err := host.ListLibraryMedia(ctx, req)
+	if err != nil || resp == nil {
+		return nil
+	}
+	return resp.Items
+}
+
+func liveListenerChange(cur, next pluginrt.Config) bool {
+	return strings.TrimSpace(cur.StandaloneHTTPListen) != strings.TrimSpace(next.StandaloneHTTPListen) ||
+		cur.PublicPort != next.PublicPort
+}
+
+func initialCatalogLibraryID(stats *store.CatalogStats, allowed []string, requested string) string {
+	allowed = cleanList(allowed)
+	allowedSet := map[string]bool{}
+	for _, id := range allowed {
+		allowedSet[id] = true
+	}
+	isAllowed := func(id string) bool {
+		return id != "" && (len(allowedSet) == 0 || allowedSet[id])
+	}
+	requested = strings.TrimSpace(requested)
+	if isAllowed(requested) {
+		for _, library := range stats.LibraryCounts {
+			if library.LibraryID == requested {
+				return requested
+			}
+		}
+	}
+	for _, library := range stats.LibraryCounts {
+		if isAllowed(library.LibraryID) {
+			return library.LibraryID
+		}
+	}
+	return ""
+}
+
+func scopeCatalogStats(stats *store.CatalogStats, mediaTypes []string) *store.CatalogStats {
+	normalized := normalizeStoreMediaTypes(mediaTypes)
+	if stats == nil || len(normalized) == 0 {
+		return stats
+	}
+	allowed := map[string]bool{}
+	for _, mediaType := range normalized {
+		allowed[mediaType] = true
+	}
+	out := &store.CatalogStats{
+		MediaTypeCounts: make([]store.CatalogTypeCount, 0, len(stats.MediaTypeCounts)),
+		LibraryCounts:   make([]store.CatalogLibraryCount, 0, len(stats.LibraryCounts)),
+		QualityCounts:   append([]store.CatalogQualityCount(nil), stats.QualityCounts...),
+	}
+	for _, count := range stats.MediaTypeCounts {
+		if allowed[count.MediaType] {
+			out.MediaTypeCounts = append(out.MediaTypeCounts, count)
+			out.TotalItems += count.Count
+		}
+	}
+	for _, count := range stats.LibraryCounts {
+		libraryType := count.MediaType
+		if libraryType == "tv" {
+			libraryType = "series"
+		}
+		if allowed[libraryType] {
+			out.LibraryCounts = append(out.LibraryCounts, count)
+		}
+	}
+	return out
+}
+
+func hPublicAsset() http.HandlerFunc {
+	dist, err := fs.Sub(publicSPA, "public/dist")
+	if err != nil {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		}
+	}
+	handler := http.StripPrefix("/", http.FileServer(http.FS(dist)))
+	return func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	}
+}
+
+func writePublicApp(w http.ResponseWriter, r *http.Request, bootstrap publicBootstrap, status int) {
+	if bootstrap.Theme == "" || bootstrap.Theme == "default" {
+		bootstrap.Theme = "cinema-light"
+	}
+	if bootstrap.CatalogHref == "" {
+		bootstrap.CatalogHref = "catalog"
+	}
+	index, err := publicSPA.ReadFile("public/dist/index.html")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "spa_unavailable", "public catalog app has not been built")
+		return
+	}
+	rawBootstrap, err := json.Marshal(bootstrap)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "bootstrap_failed", err.Error())
+		return
+	}
+	index = bytes.Replace(index, []byte("%PUBLIC_CATALOG_BOOTSTRAP%"), rawBootstrap, 1)
+	index = bytes.Replace(index, []byte(`<html lang="en">`), []byte(`<html lang="en" data-theme="`+html.EscapeString(bootstrap.Theme)+`">`), 1)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(index)
+	_ = r
 }
 
 func hCatalogLogin(d Deps) http.HandlerFunc {
@@ -274,9 +467,9 @@ func hCatalogLogin(d Deps) http.HandlerFunc {
 
 func hStats(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		stats, err := hostStats(r.Context(), d, nil)
+		stats, err := publicCatalogStats(r.Context(), d, nil)
 		if err != nil {
-			writeJSON(w, http.StatusOK, runtimehost.CatalogStats{})
+			writeJSON(w, http.StatusOK, store.CatalogStats{})
 			return
 		}
 		writeJSON(w, http.StatusOK, stats)
@@ -290,19 +483,19 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "catalog_auth_required", "catalog password or bypass token is required")
 			return
 		}
-		host := currentHost(d)
-		if host == nil {
-			writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
-			return
-		}
 		q := r.URL.Query()
 		mediaTypes, ok := mergeMediaTypes(claims.MediaTypes, q["media_type"])
 		if !ok {
 			writeErr(w, http.StatusBadRequest, "invalid_media_type", "requested media type is not available for this catalog link")
 			return
 		}
+		libraryIDs, ok := mergeLibraryIDs(claims.LibraryIDs, q["library_id"])
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "invalid_library", "requested library is not available for this catalog link")
+			return
+		}
 		req := runtimehost.ListLibraryMediaRequest{
-			LibraryIDs: claims.LibraryIDs,
+			LibraryIDs: libraryIDs,
 			MediaTypes: mediaTypes,
 			Query:      strings.TrimSpace(q.Get("q")),
 			Genre:      strings.TrimSpace(q.Get("genre")),
@@ -313,6 +506,40 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 		}
 		req.YearMin = boundedInt(q.Get("year_min"), 0, 0, 9999)
 		req.YearMax = boundedInt(q.Get("year_max"), 0, 0, 9999)
+		if d.ConfigStore != nil && directCatalogMediaTypes(req.MediaTypes) {
+			cacheKey := catalogMediaCacheKey(libraryIDs, req.MediaTypes, req.Query, req.Genre, req.YearMin, req.YearMax, req.Sort, req.Descending, req.PageSize, req.PageToken)
+			if resp, hit := d.catalogCache.getMedia(cacheKey); hit {
+				w.Header().Set("X-Public-Catalog-Cache", "HIT")
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
+			resp, err := d.ConfigStore.CatalogMedia(r.Context(), store.CatalogMediaQuery{
+				LibraryIDs: libraryIDs,
+				MediaTypes: normalizeStoreMediaTypes(req.MediaTypes),
+				Query:      req.Query,
+				Genre:      req.Genre,
+				YearMin:    req.YearMin,
+				YearMax:    req.YearMax,
+				Sort:       req.Sort,
+				Descending: req.Descending,
+				PageSize:   req.PageSize,
+				PageToken:  req.PageToken,
+			})
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "catalog_failed", err.Error())
+				return
+			}
+			overlayCatalogMediaImages(r.Context(), d, req, resp.Items)
+			d.catalogCache.setMedia(cacheKey, resp)
+			w.Header().Set("X-Public-Catalog-Cache", "MISS")
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		host := currentHost(d)
+		if host == nil {
+			writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
+			return
+		}
 		if len(req.MediaTypes) == 1 {
 			if src := sourceForType(d.Sources, req.MediaTypes[0]); src != nil {
 				resp, err := src.List(r.Context(), host, req)
@@ -336,6 +563,69 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 	}
 }
 
+func hCatalogFilters(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := catalogClaimsFromRequest(d, r)
+		if !ok {
+			writeErr(w, http.StatusUnauthorized, "catalog_auth_required", "catalog password or bypass token is required")
+			return
+		}
+		if d.ConfigStore == nil {
+			writeJSON(w, http.StatusOK, store.CatalogFilters{})
+			return
+		}
+		q := r.URL.Query()
+		mediaTypes, ok := mergeMediaTypes(claims.MediaTypes, q["media_type"])
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "invalid_media_type", "requested media type is not available for this catalog link")
+			return
+		}
+		libraryIDs, ok := mergeLibraryIDs(claims.LibraryIDs, q["library_id"])
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "invalid_library", "requested library is not available for this catalog link")
+			return
+		}
+		cacheKey := catalogFiltersCacheKey(libraryIDs, mediaTypes)
+		if filters, hit := d.catalogCache.getFilters(cacheKey); hit {
+			w.Header().Set("X-Public-Catalog-Cache", "HIT")
+			writeJSON(w, http.StatusOK, filters)
+			return
+		}
+		filters, err := d.ConfigStore.CatalogFilters(r.Context(), libraryIDs, normalizeStoreMediaTypes(mediaTypes))
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "filters_failed", err.Error())
+			return
+		}
+		d.catalogCache.setFilters(cacheKey, filters)
+		w.Header().Set("X-Public-Catalog-Cache", "MISS")
+		writeJSON(w, http.StatusOK, filters)
+	}
+}
+
+func directCatalogMediaTypes(mediaTypes []string) bool {
+	for _, mediaType := range mediaTypes {
+		switch mediaType {
+		case "", "movie", "series", "tv", "episode":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeStoreMediaTypes(mediaTypes []string) []string {
+	out := []string{}
+	for _, mediaType := range mediaTypes {
+		if mediaType == "tv" {
+			mediaType = "series"
+		}
+		if mediaType != "" {
+			out = append(out, mediaType)
+		}
+	}
+	return out
+}
+
 func emptyCatalogMediaResponse() runtimehost.ListLibraryMediaResponse {
 	return runtimehost.ListLibraryMediaResponse{
 		Items:      []runtimehost.CatalogMediaItem{},
@@ -343,10 +633,155 @@ func emptyCatalogMediaResponse() runtimehost.ListLibraryMediaResponse {
 	}
 }
 
+func hCatalogItemDetail(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := catalogClaimsFromRequest(d, r)
+		if !ok {
+			writeErr(w, http.StatusUnauthorized, "catalog_auth_required", "catalog password or bypass token is required")
+			return
+		}
+		if d.ConfigStore == nil {
+			writeErr(w, http.StatusServiceUnavailable, "catalog_unavailable", "catalog store is not configured")
+			return
+		}
+		id := strings.TrimSpace(chi.URLParam(r, "id"))
+		item, err := d.ConfigStore.CatalogItemDetail(r.Context(), id, claims.LibraryIDs)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "not_found", "catalog item was not found")
+			return
+		}
+		enrichCatalogItemImages(r.Context(), d, claims, item)
+		writeJSON(w, http.StatusOK, item)
+	}
+}
+
+func hCatalogSeriesSeasons(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := catalogClaimsFromRequest(d, r)
+		if !ok {
+			writeErr(w, http.StatusUnauthorized, "catalog_auth_required", "catalog password or bypass token is required")
+			return
+		}
+		if d.ConfigStore == nil {
+			writeJSON(w, http.StatusOK, []store.CatalogSeason{})
+			return
+		}
+		seasons, err := d.ConfigStore.CatalogSeriesSeasons(r.Context(), strings.TrimSpace(chi.URLParam(r, "id")), claims.LibraryIDs)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "seasons_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, seasons)
+	}
+}
+
+func hCatalogSeasonEpisodes(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := catalogClaimsFromRequest(d, r)
+		if !ok {
+			writeErr(w, http.StatusUnauthorized, "catalog_auth_required", "catalog password or bypass token is required")
+			return
+		}
+		if d.ConfigStore == nil {
+			writeJSON(w, http.StatusOK, []store.CatalogEpisode{})
+			return
+		}
+		seasonNumber, err := strconv.Atoi(chi.URLParam(r, "season"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_season", "season number is invalid")
+			return
+		}
+		episodes, err := d.ConfigStore.CatalogSeasonEpisodes(r.Context(), strings.TrimSpace(chi.URLParam(r, "id")), seasonNumber, claims.LibraryIDs)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "episodes_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, episodes)
+	}
+}
+
+func enrichCatalogItemImages(ctx context.Context, d Deps, claims tokenClaims, item *store.CatalogItemDetail) {
+	host := currentHost(d)
+	if host == nil || item == nil {
+		return
+	}
+	mediaTypes := []string{item.Type}
+	query := item.Title
+	matchID := item.ContentID
+	if item.Type == "season" || item.Type == "episode" {
+		mediaTypes = []string{"tv"}
+		query = item.SeriesTitle
+		matchID = item.SeriesID
+	}
+	resp, err := host.ListLibraryMedia(ctx, runtimehost.ListLibraryMediaRequest{
+		LibraryIDs: claims.LibraryIDs,
+		MediaTypes: mediaTypes,
+		Query:      query,
+		Sort:       "title",
+		PageSize:   20,
+	})
+	if err != nil || resp == nil {
+		return
+	}
+	for _, candidate := range resp.Items {
+		if candidate.MediaID != matchID {
+			continue
+		}
+		if item.Type == "season" || item.Type == "episode" {
+			if item.PosterURL == "" && candidate.PosterURL != "" {
+				item.PosterURL = candidate.PosterURL
+			}
+			if candidate.BackdropURL != "" {
+				item.BackdropURL = candidate.BackdropURL
+			}
+		} else {
+			if candidate.PosterURL != "" {
+				item.PosterURL = candidate.PosterURL
+			}
+			if candidate.BackdropURL != "" {
+				item.BackdropURL = candidate.BackdropURL
+			}
+		}
+		return
+	}
+}
+
+func overlayCatalogMediaImages(ctx context.Context, d Deps, req runtimehost.ListLibraryMediaRequest, items []store.CatalogMediaItem) {
+	if len(items) == 0 {
+		return
+	}
+	host := currentHost(d)
+	if host == nil {
+		return
+	}
+	resp, err := host.ListLibraryMedia(ctx, req)
+	if err != nil || resp == nil || len(resp.Items) == 0 {
+		return
+	}
+	byID := make(map[string]runtimehost.CatalogMediaItem, len(resp.Items))
+	for _, item := range resp.Items {
+		if item.MediaID != "" {
+			byID[item.MediaID] = item
+		}
+	}
+	for i := range items {
+		if hostItem, ok := byID[items[i].MediaID]; ok {
+			if hostItem.PosterURL != "" {
+				items[i].PosterURL = hostItem.PosterURL
+			}
+			if hostItem.BackdropURL != "" {
+				items[i].BackdropURL = hostItem.BackdropURL
+			}
+		}
+	}
+}
+
 type createTokenRequest struct {
 	Hours      int      `json:"hours"`
 	LibraryIDs []string `json:"libraryIds"`
 	MediaTypes []string `json:"mediaTypes"`
+	SaveName   string   `json:"saveName"`
+	HTML       string   `json:"html"`
 }
 
 func hCreateToken(d Deps) http.HandlerFunc {
@@ -373,13 +808,67 @@ func hCreateToken(d Deps) http.HandlerFunc {
 		}
 		path := "catalog?token=" + url.QueryEscape(token)
 		link := path
-		if d.PublicBaseURL != "" {
-			link = strings.TrimRight(d.PublicBaseURL, "/") + "/" + path
+		if base := publicBaseURLForRequest(r, d); base != "" {
+			link = strings.TrimRight(base, "/") + "/" + path
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"token": token,
 			"url":   link,
-		})
+		}
+		if name := strings.TrimSpace(req.SaveName); name != "" {
+			if d.ConfigStore == nil {
+				writeErr(w, http.StatusServiceUnavailable, "config_store_unavailable", "config storage is not configured")
+				return
+			}
+			saved, err := d.ConfigStore.SaveCatalogLink(r.Context(), store.SavedCatalogLink{
+				Name:       name,
+				Token:      token,
+				URL:        link,
+				HTML:       req.HTML,
+				MediaTypes: cleanList(req.MediaTypes),
+				LibraryIDs: cleanList(req.LibraryIDs),
+			})
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "save_link_failed", err.Error())
+				return
+			}
+			resp["savedLink"] = saved
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func hDeleteCatalogLink(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if d.ConfigStore == nil {
+			writeErr(w, http.StatusServiceUnavailable, "config_store_unavailable", "config storage is not configured")
+			return
+		}
+		id, err := strconv.Atoi(chi.URLParam(r, "id"))
+		if err != nil || id <= 0 {
+			writeErr(w, http.StatusBadRequest, "bad_id", "catalog link id is invalid")
+			return
+		}
+		if err := d.ConfigStore.DeleteCatalogLink(r.Context(), id); err != nil {
+			writeErr(w, http.StatusNotFound, "not_found", "catalog link was not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
+func hListCatalogLinks(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if d.ConfigStore == nil {
+			writeJSON(w, http.StatusOK, []store.SavedCatalogLink{})
+			return
+		}
+		links, err := d.ConfigStore.ListCatalogLinks(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "list_links_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, links)
 	}
 }
 
@@ -504,6 +993,10 @@ func hAdminPage(d Deps) http.HandlerFunc {
 		if d.CatalogPassword == "" {
 			passwordStatus = "Not configured"
 		}
+		publicPageURL := publicBaseURLForRequest(r, d)
+		if publicPageURL == "" {
+			publicPageURL = "../"
+		}
 		writeHTML(w, `<!doctype html>
 <html lang="en" data-theme="`+adminTheme(r)+`">
 <head>
@@ -521,7 +1014,7 @@ func hAdminPage(d Deps) http.HandlerFunc {
       <h1>Public Catalog</h1>
       <p class="lead">Publish a public landing page, protect the catalog with a password, and create permanent bypass links.</p>
     </div>
-    <a class="button" href="../" target="_blank" rel="noreferrer">Open public page</a>
+    <a class="button" id="openPublicPage" href="`+html.EscapeString(publicPageURL)+`" target="_blank" rel="noreferrer">Open public page</a>
   </section>
 
   <section class="admin-grid">
@@ -531,29 +1024,80 @@ func hAdminPage(d Deps) http.HandlerFunc {
         <span id="state" class="status-pill">Ready</span>
       </div>
       <form id="tokenForm" class="admin-form">
+        <fieldset class="token-scope">
+          <legend>Catalog scope</legend>
+          <label class="check"><input type="radio" name="tokenScope" value="all" checked> All content</label>
+          <label class="check"><input type="radio" name="tokenScope" value="custom"> Selected media types</label>
+        </fieldset>
         <fieldset>
           <legend>Media types</legend>
-          <label class="check"><input type="checkbox" name="mediaTypes" value="movie" checked> Movies</label>
-          <label class="check"><input type="checkbox" name="mediaTypes" value="tv" checked> TV</label>
-          <label class="check"><input type="checkbox" name="mediaTypes" value="episode" checked> Episodes</label>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="movie"> Movies</label>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="tv"> TV</label>
+          <label class="check"><input type="checkbox" name="mediaTypes" value="episode"> Episodes</label>
           <label class="check"><input type="checkbox" name="mediaTypes" value="ebook"> Ebooks</label>
           <label class="check"><input type="checkbox" name="mediaTypes" value="audiobook"> Audiobooks</label>
         </fieldset>
         <label>Library IDs
           <input id="libraryIds" name="libraryIds" placeholder="Optional comma-separated IDs">
         </label>
-        <button class="button primary" type="submit">Generate catalog link</button>
+        <div class="settings-row compact-row">
+          <label class="medium-field">Custom link name
+            <input id="saveName" name="saveName" placeholder="Bree">
+          </label>
+        </div>
+        <label>Custom page HTML
+          <textarea id="customHTML" name="customHTML" rows="8" spellcheck="false" placeholder="<h2>Bree's catalog</h2>"></textarea>
+        </label>
+        <button class="button primary" type="submit">Save custom link</button>
       </form>
       <div id="result" class="result-box" hidden>
         <label>Catalog URL
           <textarea id="urlOut" readonly rows="3"></textarea>
         </label>
+        <label>Public page URL
+          <textarea id="pageUrlOut" readonly rows="2"></textarea>
+        </label>
         <div class="actions">
           <button class="button" id="copy" type="button">Copy</button>
+          <button class="button" id="copyPage" type="button">Copy page</button>
           <a class="button" id="openLink" href="#" target="_blank" rel="noreferrer">Open</a>
+          <a class="button" id="openPageLink" href="#" target="_blank" rel="noreferrer">Open page</a>
         </div>
       </div>
       <pre id="errorOut" class="error-box" hidden></pre>
+    </div>
+
+    <div class="panel admin-panel">
+      <div class="panel-head">
+        <h2>Public settings</h2>
+        <span id="configState" class="status-pill">Loading</span>
+      </div>
+      <form id="configForm" class="admin-form">
+        <div class="settings-row compact-row">
+          <label class="short-field">Public port
+            <input id="publicPort" name="publicPort" type="number" min="1" max="65535" placeholder="9999">
+          </label>
+          <label class="medium-field">Bind address
+            <input id="standaloneHTTPListen" name="standaloneHTTPListen" placeholder=":9999">
+          </label>
+        </div>
+        <label class="url-field">Public base URL
+          <input id="publicBaseURL" name="publicBaseURL" placeholder="http://localhost:9999">
+        </label>
+        <label class="password-field">Catalog password
+          <input id="catalogPassword" name="catalogPassword" type="password" autocomplete="new-password" placeholder="Keep current if blank">
+        </label>
+        <div class="settings-row compact-row">
+          <label class="short-field">Ebook source ID
+            <input id="ebookInstallationID" name="ebookInstallationID" inputmode="numeric">
+          </label>
+          <label class="short-field">Audio source ID
+            <input id="audioInstallationID" name="audioInstallationID" inputmode="numeric">
+          </label>
+        </div>
+        <button class="button primary compact-action" type="submit">Save</button>
+      </form>
+      <pre id="configError" class="error-box" hidden></pre>
     </div>
 
     <div class="panel admin-panel">
@@ -586,6 +1130,14 @@ func hAdminPage(d Deps) http.HandlerFunc {
       <button class="button" id="refreshStats" type="button">Refresh stats</button>
       <div id="statsOut" class="stats slim"><div><strong>...</strong><span>Loading</span></div></div>
     </aside>
+
+    <div class="panel admin-panel saved-links-panel">
+      <div class="panel-head">
+        <h2>Saved custom links</h2>
+        <span id="linksState" class="status-pill">Loading</span>
+      </div>
+      <div id="savedLinks" class="saved-links"></div>
+    </div>
   </section>
 </main>
 <script>
@@ -598,21 +1150,91 @@ function csv(id){return document.getElementById(id).value.split(",").map(v=>v.tr
 function setState(text,bad=false){state.textContent=text;state.className=bad?"status-pill bad":"status-pill"}
 function showError(message){errorOut.hidden=false;errorOut.textContent=message;setState("Error",true)}
 function hideError(){errorOut.hidden=true;errorOut.textContent=""}
+function absoluteURL(v){return new URL(v,location.href).toString()}
+function customPageURL(name){
+  if(!name)return "";
+  const u=new URL(openPublicPage.href||"./",location.href);
+  u.searchParams.set("page",name);
+  return u.toString();
+}
+async function copyText(value,stateEl,message){
+  await navigator.clipboard.writeText(value);
+  stateEl.textContent=message;
+  stateEl.className="status-pill";
+}
+async function readJSON(r){
+  const text=await r.text();
+  if(!text)return {};
+  try{return JSON.parse(text)}catch(err){throw new Error("Expected JSON but received: "+text.slice(0,120))}
+}
 tokenForm.addEventListener("submit",async event=>{
   event.preventDefault(); hideError(); setState("Generating");
-  const body={mediaTypes:list("mediaTypes"),libraryIds:csv("libraryIds")};
+  const scope=document.querySelector('[name="tokenScope"]:checked')?.value||"all";
+  const name=saveName.value.trim();
+  const body={mediaTypes:scope==="all"?[]:list("mediaTypes"),libraryIds:csv("libraryIds"),saveName:name,html:customHTML.value};
   try{
     const r=await fetch("api/admin/catalog-token",{method:"POST",headers:headers(),body:JSON.stringify(body)});
-    const data=await r.json();
+    const data=await readJSON(r);
     if(!r.ok) throw new Error(data?.error?.message||"Request failed");
-    result.hidden=false; urlOut.value=new URL(data.url,location.href).toString(); openLink.href=urlOut.value; setState("Generated");
+    result.hidden=false; urlOut.value=absoluteURL(data.url); openLink.href=urlOut.value;
+    pageUrlOut.value=name?customPageURL(name):""; openPageLink.href=pageUrlOut.value||"#";
+    setState(name?"Saved":"Generated");
+    await loadSavedLinks();
   }catch(err){showError(err.message||String(err))}
 });
-copy.addEventListener("click",async()=>{await navigator.clipboard.writeText(urlOut.value);setState("Copied")});
+copy.addEventListener("click",async()=>{await copyText(urlOut.value,state,"Copied catalog URL")});
+copyPage.addEventListener("click",async()=>{if(pageUrlOut.value)await copyText(pageUrlOut.value,state,"Copied page URL")});
+function syncTokenScope(){const custom=document.querySelector('[name="tokenScope"]:checked')?.value==="custom";document.querySelectorAll('[name="mediaTypes"]').forEach(el=>{el.disabled=!custom})}
+document.querySelectorAll('[name="tokenScope"]').forEach(el=>el.addEventListener("change",syncTokenScope));
+syncTokenScope();
+function valueOf(obj,...keys){for(const key of keys){if(obj&&obj[key]!==undefined&&obj[key]!==null)return obj[key]}return ""}
+function setConfigState(text,bad=false){configState.textContent=text;configState.className=bad?"status-pill bad":"status-pill"}
+async function loadConfig(){
+  try{
+    const r=await fetch("api/admin/config",{headers:headers()});
+    const data=await readJSON(r);
+    if(!r.ok) throw new Error(data?.error?.message||"Config unavailable");
+    publicPort.value=valueOf(data,"PublicPort","publicPort")||"";
+    standaloneHTTPListen.value=valueOf(data,"StandaloneHTTPListen","standaloneHTTPListen")||"";
+    publicBaseURL.value=valueOf(data,"PublicBaseURL","publicBaseURL")||"";
+    ebookInstallationID.value=valueOf(data,"EbookInstallationID","ebookInstallationID")||"";
+    audioInstallationID.value=valueOf(data,"AudioInstallationID","audioInstallationID")||"";
+    setConfigState("Ready");
+  }catch(err){setConfigState("Error",true);configError.hidden=false;configError.textContent=err.message||String(err)}
+}
+configForm.addEventListener("submit",async event=>{
+  event.preventDefault(); configError.hidden=true; configError.textContent=""; setConfigState("Saving");
+  const port=Number(publicPort.value||0);
+  const body={
+    PublicPort:Number.isFinite(port)?port:0,
+    StandaloneHTTPListen:standaloneHTTPListen.value.trim(),
+    PublicBaseURL:publicBaseURL.value.trim(),
+    CatalogPassword:catalogPassword.value,
+    EbookInstallationID:ebookInstallationID.value.trim(),
+    AudioInstallationID:audioInstallationID.value.trim()
+  };
+  try{
+    const r=await fetch("api/admin/config",{method:"PATCH",headers:headers(),body:JSON.stringify(body)});
+    const data=await readJSON(r);
+    if(!r.ok) throw new Error(data?.error?.message||"Save failed");
+    catalogPassword.value=""; setConfigState("Saved");
+    const base=body.PublicBaseURL||publicURLFromListen(body.StandaloneHTTPListen||((body.PublicPort>0)?":"+body.PublicPort:""));
+    if(base)openPublicPage.href=base;
+  }catch(err){setConfigState("Error",true);configError.hidden=false;configError.textContent=err.message||String(err)}
+});
+function publicURLFromListen(listen){
+  if(!listen)return "";
+  let host=location.hostname, port="";
+  const m=listen.match(/^\[?([^\]]*)\]?:(\d+)$/);
+  if(m){if(m[1]&&m[1]!=="0.0.0.0"&&m[1]!=="::")host=m[1];port=m[2]}
+  else if(/^\d+$/.test(listen)){port=listen}
+  if(!port)return "";
+  return location.protocol+"//"+host+":"+port+"/";
+}
 async function loadHTML(){
   try{
     const r=await fetch("api/admin/html-section",{headers:headers()});
-    const data=await r.json();
+    const data=await readJSON(r);
     if(!r.ok) throw new Error(data?.error?.message||"HTML unavailable");
     htmlInput.value=data.html||""; htmlPreview.innerHTML=htmlInput.value; htmlState.textContent="Ready";
   }catch(err){htmlState.textContent="Error"; htmlState.className="status-pill bad"; htmlPreview.textContent=err.message||String(err)}
@@ -621,7 +1243,7 @@ htmlForm.addEventListener("submit",async event=>{
   event.preventDefault(); htmlState.textContent="Publishing"; htmlState.className="status-pill";
   try{
     const r=await fetch("api/admin/html-section",{method:"PUT",headers:headers(),body:JSON.stringify({html:htmlInput.value})});
-    const data=await r.json();
+    const data=await readJSON(r);
     if(!r.ok) throw new Error(data?.error?.message||"Save failed");
     htmlPreview.innerHTML=htmlInput.value; htmlState.textContent="Published";
   }catch(err){htmlState.textContent="Error"; htmlState.className="status-pill bad"; htmlPreview.textContent=err.message||String(err)}
@@ -630,7 +1252,7 @@ previewHtml.addEventListener("click",()=>{htmlPreview.innerHTML=htmlInput.value}
 async function loadStats(){
   try{
     const r=await fetch("api/public/stats");
-    const data=await r.json();
+    const data=await readJSON(r);
     if(!r.ok) throw new Error(data?.error?.message||"Stats unavailable");
     statsOut.innerHTML="";
     const counts=data.mediaTypeCounts||[];
@@ -640,11 +1262,118 @@ async function loadStats(){
 }
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 refreshStats.addEventListener("click",loadStats);
-loadStats(); loadHTML();
+function setLinksState(text,bad=false){linksState.textContent=text;linksState.className=bad?"status-pill bad":"status-pill"}
+function selectSavedLink(link){
+  saveName.value=link.name||"";
+  customHTML.value=link.html||"";
+  libraryIds.value=(link.libraryIds||[]).join(",");
+  document.querySelector('[name="tokenScope"][value="'+((link.mediaTypes||[]).length?"custom":"all")+'"]').checked=true;
+  document.querySelectorAll('[name="mediaTypes"]').forEach(el=>{el.checked=(link.mediaTypes||[]).includes(el.value)});
+  syncTokenScope();
+  result.hidden=false;
+  urlOut.value=absoluteURL(link.url||("catalog?token="+encodeURIComponent(link.token||"")));
+  openLink.href=urlOut.value;
+  pageUrlOut.value=customPageURL(link.name||"");
+  openPageLink.href=pageUrlOut.value||"#";
+  setState("Loaded");
+}
+async function deleteSavedLink(id){
+  setLinksState("Deleting");
+  const r=await fetch("api/admin/catalog-links/"+encodeURIComponent(id),{method:"DELETE",headers:headers()});
+  const data=await readJSON(r);
+  if(!r.ok) throw new Error(data?.error?.message||"Delete failed");
+  await loadSavedLinks();
+}
+async function loadSavedLinks(){
+  try{
+    setLinksState("Loading");
+    const r=await fetch("api/admin/catalog-links",{headers:headers()});
+    const data=await readJSON(r);
+    if(!r.ok) throw new Error(data?.error?.message||"Saved links unavailable");
+    savedLinks.innerHTML="";
+    if(!data.length){savedLinks.innerHTML='<p class="empty-note">No custom links saved yet.</p>';setLinksState("Ready");return}
+    for(const link of data){
+      const row=document.createElement("div");
+      row.className="saved-link-row";
+      const page=customPageURL(link.name||"");
+      row.innerHTML='<div class="saved-link-copy"><strong>'+esc(link.name||"Untitled")+'</strong><span>'+esc(page)+'</span></div><div class="saved-link-actions"><button class="button" type="button" data-act="load">Load</button><button class="button" type="button" data-act="copy">Copy</button><a class="button" data-act="open" target="_blank" rel="noreferrer">Open</a><button class="button danger" type="button" data-act="delete">Delete</button></div>';
+      row.querySelector('[data-act="open"]').href=page;
+      row.querySelector('[data-act="load"]').addEventListener("click",()=>selectSavedLink(link));
+      row.querySelector('[data-act="copy"]').addEventListener("click",async()=>copyText(page,linksState,"Copied"));
+      row.querySelector('[data-act="delete"]').addEventListener("click",async()=>{try{await deleteSavedLink(link.id)}catch(err){setLinksState("Error",true);alert(err.message||String(err))}});
+      savedLinks.appendChild(row);
+    }
+    setLinksState("Ready");
+  }catch(err){setLinksState("Error",true);savedLinks.innerHTML='<p class="empty-note">'+esc(err.message||String(err))+'</p>'}
+}
+loadStats(); loadHTML(); loadConfig(); loadSavedLinks();
 </script>
 </body>
 </html>`)
 	}
+}
+
+func publicBaseURLForRequest(r *http.Request, d Deps) string {
+	if d.PublicBaseURL != "" {
+		return strings.TrimRight(d.PublicBaseURL, "/") + "/"
+	}
+	if d.StandaloneListen == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(d.StandaloneListen)
+	if err != nil {
+		if strings.HasPrefix(d.StandaloneListen, ":") {
+			port = strings.TrimPrefix(d.StandaloneListen, ":")
+		} else if _, convErr := strconv.Atoi(d.StandaloneListen); convErr == nil {
+			port = d.StandaloneListen
+		} else {
+			return ""
+		}
+	}
+	if port == "" {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = requestHostname(r)
+	}
+	if host == "" {
+		host = "localhost"
+	}
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(host, port) + "/"
+}
+
+func requestHostname(r *http.Request) string {
+	if h, _, err := net.SplitHostPort(r.Host); err == nil {
+		return h
+	}
+	return strings.Trim(r.Host, "[]")
+}
+
+func publicCatalogStats(ctx context.Context, d Deps, libraryIDs []string) (*store.CatalogStats, error) {
+	if d.ConfigStore != nil {
+		stats, err := d.ConfigStore.CatalogStats(ctx, libraryIDs)
+		if err == nil && stats != nil && (stats.TotalItems > 0 || len(stats.MediaTypeCounts) > 0 || len(stats.LibraryCounts) > 0 || len(stats.QualityCounts) > 0) {
+			host := currentHost(d)
+			if host != nil {
+				if withSources, sourceErr := withSourceStats(ctx, host, runtimeStatsFromStore(stats), d.Sources); sourceErr == nil {
+					stats = storeStatsFromRuntime(withSources, stats.QualityCounts)
+				}
+			}
+			return stats, nil
+		}
+	}
+	stats, err := hostStats(ctx, d, libraryIDs)
+	if err != nil {
+		return nil, err
+	}
+	return storeStatsFromRuntime(stats, nil), nil
 }
 
 func hostStats(ctx context.Context, d Deps, libraryIDs []string) (*runtimehost.CatalogStats, error) {
@@ -655,11 +1384,43 @@ func hostStats(ctx context.Context, d Deps, libraryIDs []string) (*runtimehost.C
 	if host == nil {
 		return nil, http.ErrServerClosed
 	}
-	stats, err := host.GetCatalogStats(ctx, libraryIDs)
+	stats, err := safeGetCatalogStats(ctx, host, libraryIDs)
 	if err != nil {
 		return nil, err
 	}
 	return withSourceStats(ctx, host, stats, d.Sources)
+}
+
+func runtimeStatsFromStore(stats *store.CatalogStats) *runtimehost.CatalogStats {
+	if stats == nil {
+		return &runtimehost.CatalogStats{}
+	}
+	out := &runtimehost.CatalogStats{TotalItems: stats.TotalItems}
+	for _, c := range stats.MediaTypeCounts {
+		out.MediaTypeCounts = append(out.MediaTypeCounts, runtimehost.CatalogTypeCount{MediaType: c.MediaType, Count: c.Count})
+	}
+	for _, c := range stats.LibraryCounts {
+		out.LibraryCounts = append(out.LibraryCounts, runtimehost.CatalogLibraryCount{
+			LibraryID: c.LibraryID, LibraryName: c.LibraryName, MediaType: c.MediaType, Count: c.Count,
+		})
+	}
+	return out
+}
+
+func storeStatsFromRuntime(stats *runtimehost.CatalogStats, quality []store.CatalogQualityCount) *store.CatalogStats {
+	if stats == nil {
+		return &store.CatalogStats{QualityCounts: quality}
+	}
+	out := &store.CatalogStats{TotalItems: stats.TotalItems, QualityCounts: quality}
+	for _, c := range stats.MediaTypeCounts {
+		out.MediaTypeCounts = append(out.MediaTypeCounts, store.CatalogTypeCount{MediaType: c.MediaType, Count: c.Count})
+	}
+	for _, c := range stats.LibraryCounts {
+		out.LibraryCounts = append(out.LibraryCounts, store.CatalogLibraryCount{
+			LibraryID: c.LibraryID, LibraryName: c.LibraryName, MediaType: c.MediaType, Count: c.Count,
+		})
+	}
+	return out
 }
 
 type statsCache struct {
@@ -671,6 +1432,127 @@ type statsCache struct {
 type statsCacheEntry struct {
 	expires time.Time
 	stats   *runtimehost.CatalogStats
+}
+
+type catalogCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	media   map[string]catalogMediaCacheEntry
+	filters map[string]catalogFiltersCacheEntry
+}
+
+type catalogMediaCacheEntry struct {
+	expires time.Time
+	resp    *store.CatalogMediaResponse
+}
+
+type catalogFiltersCacheEntry struct {
+	expires time.Time
+	resp    *store.CatalogFilters
+}
+
+func newCatalogCache(ttl time.Duration) *catalogCache {
+	return &catalogCache{
+		ttl:     ttl,
+		media:   map[string]catalogMediaCacheEntry{},
+		filters: map[string]catalogFiltersCacheEntry{},
+	}
+}
+
+func (c *catalogCache) getMedia(key string) (*store.CatalogMediaResponse, bool) {
+	if c == nil || key == "" {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.media[key]
+	if !ok || time.Now().After(entry.expires) {
+		if ok {
+			delete(c.media, key)
+		}
+		return nil, false
+	}
+	return entry.resp, true
+}
+
+func (c *catalogCache) setMedia(key string, resp *store.CatalogMediaResponse) {
+	if c == nil || key == "" || resp == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.media[key] = catalogMediaCacheEntry{expires: time.Now().Add(c.ttl), resp: resp}
+	if len(c.media) > 256 {
+		c.pruneLocked()
+	}
+}
+
+func (c *catalogCache) getFilters(key string) (*store.CatalogFilters, bool) {
+	if c == nil || key == "" {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.filters[key]
+	if !ok || time.Now().After(entry.expires) {
+		if ok {
+			delete(c.filters, key)
+		}
+		return nil, false
+	}
+	return entry.resp, true
+}
+
+func (c *catalogCache) setFilters(key string, resp *store.CatalogFilters) {
+	if c == nil || key == "" || resp == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.filters[key] = catalogFiltersCacheEntry{expires: time.Now().Add(c.ttl), resp: resp}
+	if len(c.filters) > 128 {
+		c.pruneLocked()
+	}
+}
+
+func (c *catalogCache) pruneLocked() {
+	now := time.Now()
+	for key, entry := range c.media {
+		if now.After(entry.expires) {
+			delete(c.media, key)
+		}
+	}
+	for key, entry := range c.filters {
+		if now.After(entry.expires) {
+			delete(c.filters, key)
+		}
+	}
+}
+
+func catalogMediaCacheKey(libraryIDs, mediaTypes []string, query, genre string, yearMin, yearMax int, sort string, descending bool, pageSize int, pageToken string) string {
+	return strings.Join([]string{
+		"media",
+		cacheListKey(libraryIDs),
+		cacheListKey(mediaTypes),
+		strings.TrimSpace(query),
+		strings.TrimSpace(genre),
+		strconv.Itoa(yearMin),
+		strconv.Itoa(yearMax),
+		sort,
+		strconv.FormatBool(descending),
+		strconv.Itoa(pageSize),
+		pageToken,
+	}, "\x00")
+}
+
+func catalogFiltersCacheKey(libraryIDs, mediaTypes []string) string {
+	return strings.Join([]string{"filters", cacheListKey(libraryIDs), cacheListKey(mediaTypes)}, "\x00")
+}
+
+func cacheListKey(in []string) string {
+	out := cleanList(in)
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }
 
 func (c *statsCache) get(ctx context.Context, hostFn func() Host, libraryIDs []string, sources []CatalogSource) (*runtimehost.CatalogStats, error) {
@@ -690,7 +1572,7 @@ func (c *statsCache) get(ctx context.Context, hostFn func() Host, libraryIDs []s
 	if host == nil {
 		return nil, http.ErrServerClosed
 	}
-	stats, err := host.GetCatalogStats(ctx, libraryIDs)
+	stats, err := safeGetCatalogStats(ctx, host, libraryIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -706,6 +1588,16 @@ func (c *statsCache) get(ctx context.Context, hostFn func() Host, libraryIDs []s
 	c.entries[key] = statsCacheEntry{expires: now.Add(c.ttl), stats: stats}
 	c.mu.Unlock()
 	return stats, nil
+}
+
+func safeGetCatalogStats(ctx context.Context, host Host, libraryIDs []string) (stats *runtimehost.CatalogStats, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			stats = nil
+			err = fmt.Errorf("get catalog stats panicked: %v", recovered)
+		}
+	}()
+	return host.GetCatalogStats(ctx, libraryIDs)
 }
 
 func currentHost(d Deps) Host {
@@ -775,26 +1667,65 @@ func statsCacheKey(libraryIDs []string) string {
 	return strings.Join(ids, "\x00")
 }
 
-func statsHTML(stats *runtimehost.CatalogStats) string {
+func statsHTML(stats *store.CatalogStats) string {
 	if stats == nil {
 		return `<p>Stats are not available yet.</p>`
 	}
 	var b strings.Builder
 	b.WriteString(`<div class="stats">`)
+	b.WriteString(`<div class="stat-card stat-total"><small>Total</small><strong>`)
+	b.WriteString(formatCount(stats.TotalItems))
+	b.WriteString(`</strong><span>Total items</span></div>`)
+	if len(stats.MediaTypeCounts) == 0 && len(stats.LibraryCounts) == 0 && len(stats.QualityCounts) == 0 {
+		b.WriteString(`</div>`)
+		return b.String()
+	}
+	for _, c := range stats.LibraryCounts {
+		b.WriteString(`<div class="stat-card stat-library"><small>Library</small><strong>`)
+		b.WriteString(formatCount(c.Count))
+		b.WriteString(`</strong><span>`)
+		b.WriteString(html.EscapeString(c.LibraryName))
+		b.WriteString(`</span></div>`)
+	}
 	for _, c := range stats.MediaTypeCounts {
-		b.WriteString(`<div><strong>`)
-		b.WriteString(strconv.Itoa(c.Count))
+		b.WriteString(`<div class="stat-card stat-media"><small>Media</small><strong>`)
+		b.WriteString(formatCount(c.Count))
 		b.WriteString(`</strong><span>`)
 		b.WriteString(html.EscapeString(c.MediaType))
+		b.WriteString(`</span></div>`)
+	}
+	for _, c := range stats.QualityCounts {
+		b.WriteString(`<div class="stat-card stat-quality"><small>Quality</small><strong>`)
+		b.WriteString(formatCount(c.Count))
+		b.WriteString(`</strong><span>`)
+		b.WriteString(html.EscapeString(c.Label))
 		b.WriteString(`</span></div>`)
 	}
 	b.WriteString(`</div>`)
 	return b.String()
 }
 
+func formatCount(n int) string {
+	s := strconv.Itoa(n)
+	if n < 1000 {
+		return s
+	}
+	var b strings.Builder
+	first := len(s) % 3
+	if first == 0 {
+		first = 3
+	}
+	b.WriteString(s[:first])
+	for i := first; i < len(s); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
 func adHTML(v string) string {
 	if strings.TrimSpace(v) == "" {
-		return `<p>Contact us for access and availability.</p>`
+		return `<div class="custom-html-sample"><p><strong>Private catalog access</strong></p><p>Use the searchable catalog to confirm availability before requesting access. Curated public links can include a dedicated note for each recipient, library group, or event.</p></div>`
 	}
 	return v
 }
@@ -881,6 +1812,28 @@ func mergeMediaTypes(allowed, requested []string) ([]string, bool) {
 	return out, len(out) > 0
 }
 
+func mergeLibraryIDs(allowed, requested []string) ([]string, bool) {
+	requested = cleanList(requested)
+	allowed = cleanList(allowed)
+	if len(allowed) == 0 {
+		return requested, true
+	}
+	if len(requested) == 0 {
+		return allowed, true
+	}
+	ok := map[string]bool{}
+	for _, v := range allowed {
+		ok[v] = true
+	}
+	out := []string{}
+	for _, v := range requested {
+		if ok[v] {
+			out = append(out, v)
+		}
+	}
+	return out, len(out) > 0
+}
+
 func cleanMediaTypes(in []string) ([]string, bool) {
 	out := make([]string, 0, len(in))
 	for _, v := range cleanList(in) {
@@ -903,11 +1856,11 @@ func cleanMediaTypes(in []string) ([]string, bool) {
 }
 
 func css() string {
-	return `:root{--bg:#0f1115;--fg:#f5f7fb;--muted:#aab3c2;--muted2:#8994a8;--panel:#171b23;--panel2:#151922;--border:#2b3342;--input:#171b23;--accent:#8eb6ff;--primary:#2563eb;--primary-border:#3b82f6}[data-theme="cinema-light"]{color-scheme:light;--bg:#f7f3ed;--fg:#201c18;--muted:#74675a;--muted2:#8c7b6a;--panel:#fffaf3;--panel2:#fffaf3;--border:#ded1c0;--input:#fffaf3;--accent:#9a3412;--primary:#9a3412;--primary-border:#c2410c}[data-theme="cobalt-studio"]{--bg:#101623;--fg:#eef4ff;--muted:#9fb2d0;--muted2:#8aa0c0;--panel:#172033;--panel2:#172033;--border:#2d3f61;--input:#121c2f;--accent:#60a5fa;--primary:#2563eb;--primary-border:#60a5fa}[data-theme="oxblood-noir"]{--bg:#170b10;--fg:#fff1f4;--muted:#c59aa6;--muted2:#a77d89;--panel:#241018;--panel2:#241018;--border:#4a2230;--input:#211018;--accent:#fb7185;--primary:#be123c;--primary-border:#fb7185}[data-theme="evergreen-studio"]{--bg:#0d1712;--fg:#ecfdf3;--muted:#9bc7b2;--muted2:#7da18f;--panel:#14241b;--panel2:#14241b;--border:#2b4b39;--input:#102017;--accent:#6ee7b7;--primary:#047857;--primary-border:#6ee7b7}body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--fg)} .shell{max-width:1180px;margin:0 auto;padding:32px 20px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:48px 0}.eyebrow{color:var(--accent);text-transform:uppercase;font-size:12px;letter-spacing:.08em}.hero h1{font-size:44px;line-height:1.05;margin:0 0 12px}.lead{color:var(--muted);font-size:18px}.stat{border:1px solid var(--border);border-radius:8px;padding:20px;min-width:180px;background:var(--panel)}.stat span{display:block;font-size:36px;font-weight:700}.stat small{color:var(--muted)}.panel{border-top:1px solid var(--border);padding:28px 0}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}.stats div,.card{background:var(--panel);border:1px solid var(--border);border-radius:8px}.stats div{padding:16px}.stats strong{display:block;font-size:26px}.stats span,.card p{color:var(--muted)}.toolbar{display:grid;grid-template-columns:1fr 160px 160px;gap:10px;position:sticky;top:0;background:var(--bg);padding:16px 0}input,select,.button{border:1px solid var(--border);background:var(--input);color:var(--fg);border-radius:6px;padding:10px 12px}.button{cursor:pointer}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}.poster{aspect-ratio:2/3;background:var(--panel);border-radius:8px 8px 0 0;overflow:hidden}.poster img{width:100%;height:100%;object-fit:cover}.body{padding:12px}.body h3{font-size:15px;margin:0 0 8px}@media(max-width:700px){.hero{display:block}.toolbar{grid-template-columns:1fr}.hero h1{font-size:34px}}`
+	return `:root{color-scheme:dark;--bg:#0d1016;--fg:#f6f7fb;--muted:#a6b0c0;--muted2:#788396;--panel:#151923;--panel2:#111720;--border:#283142;--input:#121821;--accent:#d5ae63;--accent2:#7c9fb6;--primary:#d5ae63;--primary-border:#e1c37d;--shadow:rgba(5,8,14,.38)}[data-theme="cinema-light"]{color-scheme:light;--bg:#f4f1ea;--fg:#1c1b18;--muted:#6f695f;--muted2:#91877a;--panel:#fffaf1;--panel2:#f9f4ea;--border:#ded2be;--input:#fffaf1;--accent:#99642a;--accent2:#526f7b;--primary:#99642a;--primary-border:#b9823c;--shadow:rgba(80,54,24,.16)}[data-theme="cobalt-studio"]{--bg:#101623;--fg:#eef4ff;--muted:#9fb2d0;--muted2:#8aa0c0;--panel:#172033;--panel2:#121c2d;--border:#2d3f61;--input:#121c2f;--accent:#d5ae63;--accent2:#7aa5d8;--primary:#d5ae63;--primary-border:#e6c879;--shadow:rgba(4,9,18,.38)}[data-theme="oxblood-noir"]{--bg:#170b10;--fg:#fff1f4;--muted:#c59aa6;--muted2:#a77d89;--panel:#241018;--panel2:#1c0d13;--border:#4a2230;--input:#211018;--accent:#e0b069;--accent2:#ca788d;--primary:#e0b069;--primary-border:#f0c57c;--shadow:rgba(23,4,10,.45)}[data-theme="evergreen-studio"]{--bg:#0d1712;--fg:#ecfdf3;--muted:#9bc7b2;--muted2:#7da18f;--panel:#14241b;--panel2:#101e16;--border:#2b4b39;--input:#102017;--accent:#d1b46c;--accent2:#7bb69a;--primary:#d1b46c;--primary-border:#e3ca7d;--shadow:rgba(4,16,10,.42)}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Geist,Satoshi,Outfit,system-ui,-apple-system,Segoe UI,sans-serif;background:radial-gradient(circle at 80% -10%,color-mix(in srgb,var(--accent) 16%,transparent),transparent 36rem),linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 82%,#02040a));color:var(--fg);font-variant-numeric:tabular-nums}body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.035;background-image:linear-gradient(90deg,var(--fg) 1px,transparent 1px),linear-gradient(var(--fg) 1px,transparent 1px);background-size:48px 48px;mask-image:linear-gradient(to bottom,#000,transparent 72%)}a{color:inherit}.skip-link{position:absolute;left:16px;top:12px;transform:translateY(-160%);background:var(--fg);color:var(--bg);padding:8px 10px;border-radius:6px}.skip-link:focus{transform:translateY(0)}.shell{max-width:1360px;margin:0 auto;padding:36px 24px}.public-shell{padding-bottom:68px}.page-header{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:28px;padding:34px 0 28px}.public-hero{min-height:clamp(520px,74dvh,760px);grid-template-columns:minmax(0,1.05fr) minmax(320px,.72fr);align-items:center;padding:42px 0 48px}.hero-copy{display:grid;gap:20px;max-width:760px}.space{display:grid;gap:8px}.eyebrow{margin:0;color:var(--accent);text-transform:uppercase;font-size:12px;font-weight:750;letter-spacing:.16em}.page-title{font-size:clamp(2.35rem,6vw,5.9rem);line-height:.94;margin:0;font-weight:760;letter-spacing:0;text-wrap:balance}.lead,.page-subtitle{color:var(--muted);font-size:clamp(1rem,1.45vw,1.16rem);line-height:1.65;margin:0;max-width:64ch;text-wrap:pretty}.hero-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}.result-count{text-align:right;min-width:176px}.result-count strong{display:block;font-size:clamp(2rem,4vw,4.4rem);line-height:.9;font-weight:330;letter-spacing:0}.result-count span{color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.16em;text-transform:uppercase}.hero-visual{position:relative;min-height:390px;border:1px solid color-mix(in srgb,var(--border) 80%,transparent);border-radius:8px;background:linear-gradient(145deg,color-mix(in srgb,var(--panel) 96%,transparent),color-mix(in srgb,var(--panel2) 86%,transparent));box-shadow:0 28px 72px -42px var(--shadow);overflow:hidden}.hero-count{position:absolute;right:24px;top:24px;z-index:2}.preview-stack{position:absolute;left:32px;right:28px;bottom:28px;top:98px;display:grid;grid-template-columns:1.15fr .86fr;grid-template-rows:.8fr 1fr;gap:12px;transform:rotate(-2deg)}.preview-stack span{display:block;border:1px solid color-mix(in srgb,var(--border) 80%,transparent);border-radius:8px;background:linear-gradient(160deg,color-mix(in srgb,var(--accent2) 22%,var(--panel)),color-mix(in srgb,var(--accent) 16%,var(--panel2)));box-shadow:0 20px 44px -30px var(--shadow);animation:catalog-float 8s cubic-bezier(.16,1,.3,1) infinite}.preview-stack span:nth-child(1){grid-row:1/3}.preview-stack span:nth-child(2){animation-delay:-1.5s}.preview-stack span:nth-child(3){animation-delay:-3s}.preview-stack span:nth-child(4){display:none}@keyframes catalog-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}.surface-panel{background:color-mix(in srgb,var(--panel) 88%,transparent);border:1px solid var(--border);border-radius:8px;padding:18px;box-shadow:0 20px 60px -48px var(--shadow)}.panel{border-top:1px solid var(--border);padding:34px 0}.panel h2,.surface-panel h2{margin:0 0 18px;font-size:18px;font-weight:700;letter-spacing:0}.published-html{max-width:78ch;color:var(--muted);line-height:1.7}.published-html :first-child{margin-top:0}.published-html :last-child{margin-bottom:0}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px}.stats div{position:relative;min-height:116px;background:linear-gradient(180deg,color-mix(in srgb,var(--panel) 96%,transparent),color-mix(in srgb,var(--panel2) 96%,transparent));border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:8px;padding:14px;overflow:hidden;transition:transform .28s cubic-bezier(.16,1,.3,1),border-color .28s cubic-bezier(.16,1,.3,1)}.stats div:before{content:"";position:absolute;inset:0 0 auto;height:2px;background:var(--accent);opacity:.72}.stats div:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--accent) 44%,var(--border))}.stats small{display:block;color:var(--muted2);font-size:10px;font-weight:760;letter-spacing:.16em;text-transform:uppercase}.stats strong{display:block;margin-top:18px;font-size:clamp(1.45rem,2.5vw,2.15rem);font-weight:620;line-height:1}.stats span,.media-card p{color:var(--muted)}.stats span{display:block;margin-top:8px;font-size:13px;line-height:1.3}.stats-hero{margin-bottom:18px}.toolbar{display:grid;grid-template-columns:minmax(220px,1fr) repeat(3,minmax(136px,160px)) repeat(3,minmax(112px,140px));gap:10px;position:sticky;top:0;z-index:5;margin-bottom:22px;backdrop-filter:blur(18px);box-shadow:0 18px 54px -46px var(--shadow)}input,select,.button{border:1px solid var(--border);background:color-mix(in srgb,var(--input) 94%,transparent);color:var(--fg);border-radius:6px;padding:10px 12px;font:inherit;min-height:42px;transition:transform .24s cubic-bezier(.16,1,.3,1),border-color .24s cubic-bezier(.16,1,.3,1),background .24s cubic-bezier(.16,1,.3,1)}input:focus,select:focus,.button:focus-visible{outline:2px solid color-mix(in srgb,var(--accent) 70%,transparent);outline-offset:2px}.button{display:inline-flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;cursor:pointer;font-weight:720}.button:hover{transform:translateY(-1px);border-color:color-mix(in srgb,var(--accent) 46%,var(--border))}.button:active{transform:translateY(1px) scale(.99)}.button.primary,.primary{background:var(--primary);border-color:var(--primary-border);color:#15110a}.button.secondary{background:transparent}.poster-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.media-card{min-width:0;animation:card-in .42s cubic-bezier(.16,1,.3,1) both}.media-card-image{position:relative;aspect-ratio:2/3;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 22px 44px -34px var(--shadow);transition:transform .3s cubic-bezier(.16,1,.3,1),border-color .3s cubic-bezier(.16,1,.3,1)}.media-card:hover .media-card-image{transform:translateY(-4px);border-color:color-mix(in srgb,var(--accent) 38%,var(--border))}.media-card-image img{width:100%;height:100%;object-fit:cover;display:block}.poster-gradient{position:absolute;inset:auto 0 0;height:96px;background:linear-gradient(to top,rgba(5,7,12,.62),transparent);pointer-events:none}.poster-fallback{height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:12px;color:var(--muted);font-size:14px;font-weight:650}.media-card-copy{padding:10px 2px 0}.media-card-copy h3{font-size:14px;line-height:1.25;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:680}.media-card-copy p{font-size:12px;line-height:1.35;margin:5px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.media-card-copy .meta{font-size:11px;font-weight:760;letter-spacing:.12em;text-transform:uppercase}.empty-state{grid-column:1/-1;color:var(--muted);text-align:center;padding:54px 16px;border:1px dashed var(--border);border-radius:8px}.load-row{display:flex;justify-content:center;padding:30px 0 8px}@keyframes card-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@media(min-width:640px){.poster-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}@media(min-width:768px){.poster-grid{grid-template-columns:repeat(5,minmax(0,1fr))}}@media(min-width:1024px){.poster-grid{grid-template-columns:repeat(7,minmax(0,1fr))}}@media(min-width:1280px){.poster-grid{grid-template-columns:repeat(8,minmax(0,1fr))}}@media(max-width:900px){.shell{padding:28px 16px}.page-header,.public-hero{display:grid;grid-template-columns:1fr;min-height:auto}.hero-visual{min-height:280px}.result-count{text-align:left}.hero-count{left:18px;right:auto}.preview-stack{left:18px;right:18px;top:94px}.toolbar{grid-template-columns:1fr 1fr;position:static}.toolbar input:first-child{grid-column:1/-1}}@media(max-width:560px){.toolbar{grid-template-columns:1fr}.poster-grid{gap:10px}.media-card-copy h3{font-size:13px}.hero-actions .button{width:100%}.stats{grid-template-columns:1fr 1fr}.stats div{min-height:104px}}`
 }
 
 func adminCSS() string {
-	return `.admin-shell{max-width:1220px}.admin-hero{padding-bottom:24px}.admin-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px}.admin-panel{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.admin-panel h2{margin:0 0 16px}.admin-form{display:grid;gap:16px}.admin-form label{display:grid;gap:7px;color:var(--muted)}.admin-form fieldset{border:1px solid var(--border);border-radius:8px;margin:0;padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}.admin-form legend{color:var(--muted);padding:0 6px}.check{display:flex!important;align-items:center;gap:8px}.check input{width:auto}.primary{background:var(--primary);border-color:var(--primary-border)}.status-pill{display:inline-flex;align-items:center;border:1px solid var(--primary-border);border-radius:999px;color:var(--accent);padding:6px 10px;font-size:12px}.status-pill.bad{border-color:#b54747;color:#ffadad}.result-box,.error-box{margin-top:18px}.result-box textarea{width:100%;box-sizing:border-box;resize:vertical}.actions{display:flex;gap:10px;margin-top:10px}.details{display:grid;grid-template-columns:130px 1fr;gap:10px;margin:0 0 16px}.details dt{color:var(--muted2)}.details dd{margin:0;color:var(--fg);overflow-wrap:anywhere}.compact{margin-top:12px}.error-box{white-space:pre-wrap;border:1px solid #6b2d2d;background:#2b1518;color:#ffc4c4;border-radius:8px;padding:12px}.preview-box{min-height:120px;margin-top:14px;border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:14px;overflow:auto}.slim{grid-template-columns:1fr 1fr}@media(max-width:900px){.admin-grid{grid-template-columns:1fr}.slim{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}}`
+	return `.admin-shell{max-width:1220px}.admin-hero{padding-bottom:24px}.admin-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px}.admin-panel{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.admin-panel h2{margin:0 0 16px}.admin-form{display:grid;gap:16px;justify-items:start}.admin-form label{display:grid;gap:7px;color:var(--muted);width:100%;max-width:100%}.admin-form fieldset{border:1px solid var(--border);border-radius:8px;margin:0;padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;width:100%;box-sizing:border-box}.admin-form legend{color:var(--muted);padding:0 6px}.admin-form input,.admin-form textarea{box-sizing:border-box;width:100%}.settings-row{display:flex;flex-wrap:wrap;align-items:end;gap:12px;width:100%}.compact-row{max-width:560px}.short-field{max-width:150px}.medium-field{max-width:220px}.url-field{max-width:420px}.password-field{max-width:280px}.compact-action{width:auto;min-width:92px;justify-self:start}.check{display:flex!important;align-items:center;gap:8px}.check input{width:auto}.primary{background:var(--primary);border-color:var(--primary-border)}.danger{border-color:#7f2d2d;color:#ffb4b4}.status-pill{display:inline-flex;align-items:center;border:1px solid var(--primary-border);border-radius:999px;color:var(--accent);padding:6px 10px;font-size:12px}.status-pill.bad{border-color:#b54747;color:#ffadad}.result-box,.error-box{margin-top:18px}.result-box textarea{width:100%;box-sizing:border-box;resize:vertical}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}.details{display:grid;grid-template-columns:130px 1fr;gap:10px;margin:0 0 16px}.details dt{color:var(--muted2)}.details dd{margin:0;color:var(--fg);overflow-wrap:anywhere}.compact{margin-top:12px}.error-box{white-space:pre-wrap;border:1px solid #6b2d2d;background:#2b1518;color:#ffc4c4;border-radius:8px;padding:12px}.preview-box{min-height:120px;margin-top:14px;border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:14px;overflow:auto}.slim{grid-template-columns:1fr 1fr}.admin-form .slim{display:grid;gap:12px}.saved-links-panel{grid-column:1/-1}.saved-links{display:grid;gap:10px}.saved-link-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;border:1px solid var(--border);border-radius:8px;background:var(--panel);padding:12px}.saved-link-copy{min-width:0;display:grid;gap:4px}.saved-link-copy strong{font-size:15px}.saved-link-copy span,.empty-note{color:var(--muted);overflow-wrap:anywhere}.saved-link-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.saved-link-actions .button{min-height:36px;padding:7px 10px}@media(max-width:900px){.admin-grid{grid-template-columns:1fr}.slim{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}.saved-link-row{grid-template-columns:1fr}.saved-link-actions{justify-content:flex-start}}@media(max-width:560px){.short-field,.medium-field,.url-field,.password-field{max-width:100%}.compact-action{width:100%}}`
 }
 
 func adminTheme(r *http.Request) string {

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	pluginrt "github.com/ContinuumApp/continuum-plugin-public-catalog/internal/runtime"
+	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
@@ -62,6 +64,37 @@ func (f failingCatalogSource) Stats(context.Context, Host) (*runtimehost.Catalog
 }
 func (f failingCatalogSource) List(context.Context, Host, runtimehost.ListLibraryMediaRequest) (*runtimehost.ListLibraryMediaResponse, error) {
 	return nil, errors.New("upstream unavailable")
+}
+
+type panickingStatsHost struct {
+	fakeHost
+}
+
+func (p *panickingStatsHost) GetCatalogStats(context.Context, []string) (*runtimehost.CatalogStats, error) {
+	panic("runtime host stats client unavailable")
+}
+
+func TestPublicStatsReturnsJSONWhenHostStatsPanics(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &panickingStatsHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("content-type = %q, want JSON", contentType)
+	}
+	var stats runtimehost.CatalogStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("stats response should be JSON: %v; body=%s", err, rec.Body.String())
+	}
 }
 
 func TestCatalogMediaRejectsUnavailableMediaType(t *testing.T) {
@@ -148,6 +181,48 @@ func TestCatalogMediaReportsSingleSourceFailure(t *testing.T) {
 	}
 }
 
+func TestScopeCatalogStatsFiltersToAllowedMediaTypes(t *testing.T) {
+	stats := &store.CatalogStats{
+		TotalItems: 15,
+		MediaTypeCounts: []store.CatalogTypeCount{
+			{MediaType: "movie", Count: 10},
+			{MediaType: "series", Count: 5},
+		},
+		LibraryCounts: []store.CatalogLibraryCount{
+			{LibraryID: "1", LibraryName: "Movies", MediaType: "movie", Count: 10},
+			{LibraryID: "2", LibraryName: "TV Shows", MediaType: "tv", Count: 5},
+		},
+		QualityCounts: []store.CatalogQualityCount{{Key: "4k", Label: "4K", Count: 7}},
+	}
+
+	scoped := scopeCatalogStats(stats, []string{"tv"})
+	if scoped == nil {
+		t.Fatal("scopeCatalogStats returned nil")
+	}
+	if scoped.TotalItems != 5 {
+		t.Fatalf("TotalItems = %d, want 5", scoped.TotalItems)
+	}
+	if len(scoped.MediaTypeCounts) != 1 || scoped.MediaTypeCounts[0].MediaType != "series" {
+		t.Fatalf("MediaTypeCounts = %#v, want only series", scoped.MediaTypeCounts)
+	}
+	if len(scoped.LibraryCounts) != 1 || scoped.LibraryCounts[0].LibraryID != "2" {
+		t.Fatalf("LibraryCounts = %#v, want only TV library", scoped.LibraryCounts)
+	}
+	if len(scoped.QualityCounts) != 1 || scoped.QualityCounts[0].Count != 7 {
+		t.Fatalf("QualityCounts = %#v, want preserved quality counts", scoped.QualityCounts)
+	}
+}
+
+func TestLiveListenerChangeDetectsPortOrBindUpdates(t *testing.T) {
+	cur := pluginrt.Config{PublicPort: 9999, StandaloneHTTPListen: ":9999"}
+	if liveListenerChange(cur, pluginrt.Config{PublicPort: 9999, StandaloneHTTPListen: ":9999"}) {
+		t.Fatal("liveListenerChange reported a change for identical listener settings")
+	}
+	if !liveListenerChange(cur, pluginrt.Config{PublicPort: 9998, StandaloneHTTPListen: ":9998"}) {
+		t.Fatal("liveListenerChange should detect listener changes")
+	}
+}
+
 func TestSecurityHeadersAndCatalogNoStore(t *testing.T) {
 	h := New(Deps{
 		Host:                func() Host { return &fakeHost{} },
@@ -191,8 +266,8 @@ func TestCatalogRequiresPasswordWhenNoBypassTokenOrSession(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "Catalog password") {
-		t.Fatalf("catalog should render password form, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"mode":"catalog"`) || !strings.Contains(rec.Body.String(), `"authRequired":true`) {
+		t.Fatalf("catalog should bootstrap the SPA password gate, got %s", rec.Body.String())
 	}
 }
 
@@ -331,7 +406,7 @@ func TestStatsEndpointKeepsHostStatsWhenOptionalSourceFails(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"TotalItems":12`) {
+	if !strings.Contains(rec.Body.String(), `"totalItems":12`) {
 		t.Fatalf("stats should keep host totals when optional source fails, got %s", rec.Body.String())
 	}
 }
@@ -358,11 +433,47 @@ func TestCatalogPageUsesProxyRelativeAPIURL(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `fetch("api/catalog/media?"`) {
-		t.Fatalf("catalog page should fetch media through a relative plugin URL")
+	for _, want := range []string{`id="public-catalog-bootstrap"`, `"mode":"catalog"`, `"authRequired":false`, `"token":"` + token + `"`, `src="./assets/`, `href="./assets/`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("catalog SPA shell missing %q", want)
+		}
 	}
-	if strings.Contains(body, `fetch("/api/catalog/media?`) {
-		t.Fatalf("catalog page should not fetch from the host root")
+	if strings.Contains(body, `src="/assets/`) || strings.Contains(body, `href="/assets/`) {
+		t.Fatalf("catalog page should use proxy-relative asset URLs")
+	}
+}
+
+func TestLandingPageShowsStatsPublicHTMLAndCatalogLink(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+		AdHTML:              "<p>Public offer</p>",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`id="public-catalog-bootstrap"`, `"mode":"landing"`, `Public offer`, `"catalogHref":"catalog"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("landing page missing %q", want)
+		}
+	}
+}
+
+func TestStatsHTMLFallsBackToTotalItemCard(t *testing.T) {
+	body := statsHTML(&store.CatalogStats{TotalItems: 12})
+
+	if !strings.Contains(body, `<strong>12</strong>`) {
+		t.Fatalf("stats should include total count fallback, got %s", body)
+	}
+	if !strings.Contains(body, `Total items`) {
+		t.Fatalf("stats should label total fallback, got %s", body)
 	}
 }
 
@@ -391,9 +502,14 @@ func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
 	if !strings.Contains(body, `history.replaceState`) {
 		t.Fatalf("admin page should strip the host token from the address bar after capture")
 	}
-	for _, want := range []string{"Generate bypass token", "Media types", "Library IDs", "HTML section editor", "Refresh stats"} {
+	for _, want := range []string{"Generate bypass token", "Media types", "All content", "Library IDs", "HTML section editor", "Refresh stats", "Public settings", "Custom link name", "Custom page HTML", "Saved custom links"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("admin page missing %q", want)
+		}
+	}
+	for _, want := range []string{"publicPort", "publicBaseURL", "catalogPassword", "ebookInstallationID", "audioInstallationID", "saveName", "customHTML", "api/admin/catalog-links"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("admin page missing config field %q", want)
 		}
 	}
 	if !strings.Contains(body, "Trusted HTML") {
@@ -404,6 +520,57 @@ func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
 	}
 	if strings.Contains(body, `fetch("/api/admin/catalog-token"`) {
 		t.Fatalf("admin page should not fetch from the host root")
+	}
+}
+
+func TestCreateTokenWithEmptyMediaTypesAllowsAllContent(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", bytes.NewBufferString(`{"mediaTypes":[]}`))
+	req.Header.Set("X-Continuum-User-Role", "admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	claims, err := verifyToken(testSecret, body.Token, time.Now())
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if len(claims.MediaTypes) != 0 {
+		t.Fatalf("media types = %#v, want unrestricted all-content token", claims.MediaTypes)
+	}
+}
+
+func TestAdminOpenPublicPageUsesStandaloneListener(t *testing.T) {
+	h := New(Deps{
+		Host:                func() Host { return &fakeHost{} },
+		TokenSecret:         testSecret,
+		StandaloneListen:    ":9999",
+		DefaultTokenTTLHour: 1,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://ct.wave-ninja.eu/admin", nil)
+	req.Header.Set("X-Continuum-User-Role", "admin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `href="https://ct.wave-ninja.eu:9999/"`) {
+		t.Fatalf("admin page should link public page to listener port, got %s", rec.Body.String())
 	}
 }
 
@@ -433,10 +600,10 @@ func TestAdminCanSaveAndRenderPublishedHTML(t *testing.T) {
 	if landingRec.Code != http.StatusOK {
 		t.Fatalf("landing status = %d, want 200; body=%s", landingRec.Code, landingRec.Body.String())
 	}
-	if !strings.Contains(landingRec.Body.String(), "<p>Published</p>") {
+	if !strings.Contains(landingRec.Body.String(), "Published") {
 		t.Fatalf("landing should render saved HTML, got %s", landingRec.Body.String())
 	}
-	if strings.Contains(landingRec.Body.String(), "<p>Fallback</p>") {
+	if strings.Contains(landingRec.Body.String(), "Fallback") {
 		t.Fatalf("landing should prefer saved HTML over fallback config, got %s", landingRec.Body.String())
 	}
 }
