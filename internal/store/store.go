@@ -1138,7 +1138,7 @@ func (s *Store) ListCatalogLinks(ctx context.Context) ([]SavedCatalogLink, error
 		return nil, fmt.Errorf("list catalog links: %w", err)
 	}
 	defer rows.Close()
-	var out []SavedCatalogLink
+	out := []SavedCatalogLink{}
 	for rows.Next() {
 		var link SavedCatalogLink
 		if err := rows.Scan(&link.ID, &link.Name, &link.Token, &link.URL, &link.HTML, &link.MediaTypes, &link.LibraryIDs, &link.CreatedAt, &link.UpdatedAt); err != nil {

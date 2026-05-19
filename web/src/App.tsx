@@ -281,7 +281,7 @@ function LandingPage({ bootstrap, theme, onThemeChange }: { bootstrap: Bootstrap
           <h1>Libraries</h1>
           <p className="lead">Browse the same library structure you see in Continuum, with read-only detail pages and scoped public access.</p>
           <div className="action-row">
-            <a className="button primary" href={withToken(browseHref, bootstrap.token)}>
+            <a className="button primary" href={withToken(publicRoute(browseHref), bootstrap.token)}>
               Browse libraries
             </a>
             <a className="button secondary" href="#public-note">
@@ -306,7 +306,11 @@ function LandingPage({ bootstrap, theme, onThemeChange }: { bootstrap: Bootstrap
         <SectionHeading eyebrow="Libraries" title="Browse by library" aside={status === "loading" ? "Loading stats" : `${formatCount(libraries.length)} libraries`} />
         <div className="library-grid">
           {libraries.map((library) => (
-            <a className="library-card" href={withToken(`catalog?libraryId=${encodeURIComponent(String(library.libraryId || ""))}`, bootstrap.token)} key={library.libraryId || library.libraryName}>
+            <a
+              className="library-card"
+              href={withToken(publicRoute(`catalog?libraryId=${encodeURIComponent(String(library.libraryId || ""))}`), bootstrap.token)}
+              key={library.libraryId || library.libraryName}
+            >
               <span>{mediaLabels[library.mediaType || ""] || library.mediaType || "Library"}</span>
               <strong>{library.libraryName || "Library"}</strong>
               <small>{formatCount(library.count)} total items</small>
@@ -754,7 +758,7 @@ function DetailPage({ bootstrap, theme, onThemeChange }: { bootstrap: Bootstrap;
     );
   }
 
-  const backHref = withToken(libraryId ? `catalog?libraryId=${encodeURIComponent(libraryId)}` : "catalog", bootstrap.token);
+  const backHref = withToken(publicRoute(libraryId ? `catalog?libraryId=${encodeURIComponent(libraryId)}` : "catalog"), bootstrap.token);
   const seasonEpisodes = activeSeason == null ? [] : episodesBySeason[activeSeason] || [];
   const currentEpisode = detail.type === "episode" ? seasonEpisodes.find((episode) => episode.contentId === detail.contentId) || null : null;
   const currentEpisodeIndex = currentEpisode ? seasonEpisodes.findIndex((episode) => episode.contentId === currentEpisode.contentId) : -1;
@@ -1109,12 +1113,12 @@ function TopBar({ theme, onThemeChange }: { theme: string; onThemeChange: (theme
   const darkActive = theme !== LIGHT_THEME;
   return (
     <nav className="top-bar" aria-label="Public catalog">
-      <a className="brand" href={withToken("/", bootstrap.token)}>
+      <a className="brand" href={withToken(publicRoute(""), bootstrap.token)}>
         Continuum Library
       </a>
       <div className="top-bar-links">
-        <a href={withToken("/", bootstrap.token)}>Home</a>
-        <a href={withToken(browseHref, bootstrap.token)}>Browse</a>
+        <a href={withToken(publicRoute(""), bootstrap.token)}>Home</a>
+        <a href={withToken(publicRoute(browseHref), bootstrap.token)}>Browse</a>
       </div>
       <div className="top-bar-controls">
         <div className="theme-toggle" role="group" aria-label="Theme mode">
@@ -1478,6 +1482,19 @@ function apiPath(path: string) {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+function publicRoute(path: string) {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === "/") {
+    const base = publicRouteBase();
+    return base || "/";
+  }
+  if (/^[a-z]+:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("#")) return trimmed;
+  const base = publicRouteBase();
+  const next = trimmed.replace(/^\/+/, "");
+  return base ? `${base}/${next}` : `/${next}`;
+}
+
 function tokenQuery(token: string) {
   return token ? `?token=${encodeURIComponent(token)}` : "";
 }
@@ -1494,7 +1511,7 @@ function withToken(path: string, token: string) {
 }
 
 function buildItemHref(id: string, token: string, libraryId: string) {
-  const path = libraryId ? `item/${encodeURIComponent(id)}?libraryId=${encodeURIComponent(libraryId)}` : `item/${encodeURIComponent(id)}`;
+  const path = libraryId ? publicRoute(`item/${encodeURIComponent(id)}?libraryId=${encodeURIComponent(libraryId)}`) : publicRoute(`item/${encodeURIComponent(id)}`);
   return withToken(path, token);
 }
 
@@ -1531,6 +1548,11 @@ function resolveThemePreference(bootstrapTheme: string) {
     if (saved) return saved;
   } catch {}
   return normalizeTheme(bootstrapTheme) || DARK_THEME;
+}
+
+function publicRouteBase() {
+  const match = window.location.pathname.match(/^(\/api\/v1\/plugins\/\d+)(?:\/.*)?$/);
+  return match ? match[1] : "";
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

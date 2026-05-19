@@ -523,7 +523,7 @@ func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
 	if !strings.Contains(body, `history.replaceState`) {
 		t.Fatalf("admin page should strip the host token from the address bar after capture")
 	}
-	for _, want := range []string{"Generate bypass token", "Media types", "All content", "Library IDs", "HTML section editor", "Refresh stats", "Public settings", "Custom link name", "Custom page HTML", "Saved custom links"} {
+	for _, want := range []string{"Saved access links", "Media types", "All content", "Library IDs", "HTML section editor", "Refresh stats", "Public settings", "Link name", "Custom page HTML", "Saved custom links"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("admin page missing %q", want)
 		}

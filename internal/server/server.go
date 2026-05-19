@@ -1064,10 +1064,18 @@ func hAdminPage(d Deps) http.HandlerFunc {
   <section class="admin-grid">
     <div class="panel admin-panel">
       <div class="panel-head">
-        <h2>Generate bypass token</h2>
+        <div>
+          <h2>Saved access links</h2>
+          <p class="panel-note">Create as many named bypass links as you need. Each saved link gets its own catalog URL, public page URL, scope, and custom HTML.</p>
+        </div>
         <span id="state" class="status-pill">Ready</span>
       </div>
       <form id="tokenForm" class="admin-form">
+        <div class="settings-row compact-row">
+          <label class="medium-field">Link name
+            <input id="saveName" name="saveName" placeholder="VIP access">
+          </label>
+        </div>
         <fieldset class="token-scope">
           <legend>Catalog scope</legend>
           <label class="check"><input type="radio" name="tokenScope" value="all" checked> All content</label>
@@ -1084,27 +1092,25 @@ func hAdminPage(d Deps) http.HandlerFunc {
         <label>Library IDs
           <input id="libraryIds" name="libraryIds" placeholder="Optional comma-separated IDs">
         </label>
-        <div class="settings-row compact-row">
-          <label class="medium-field">Custom link name
-            <input id="saveName" name="saveName" placeholder="Bree">
-          </label>
-        </div>
         <label>Custom page HTML
-          <textarea id="customHTML" name="customHTML" rows="8" spellcheck="false" placeholder="<h2>Bree's catalog</h2>"></textarea>
+          <textarea id="customHTML" name="customHTML" rows="8" spellcheck="false" placeholder="<h2>Private catalog access</h2>"></textarea>
         </label>
-        <button class="button primary" type="submit">Save custom link</button>
+        <div class="actions">
+          <button class="button primary" type="submit">Save link</button>
+          <button class="button" id="clearLinkForm" type="button">Clear form</button>
+        </div>
       </form>
       <div id="result" class="result-box" hidden>
-        <label>Catalog URL
+        <label>Catalog access URL
           <textarea id="urlOut" readonly rows="3"></textarea>
         </label>
         <label>Public page URL
           <textarea id="pageUrlOut" readonly rows="2"></textarea>
         </label>
         <div class="actions">
-          <button class="button" id="copy" type="button">Copy</button>
+          <button class="button" id="copy" type="button">Copy catalog URL</button>
           <button class="button" id="copyPage" type="button">Copy page</button>
-          <a class="button" id="openLink" href="#" target="_blank" rel="noreferrer">Open</a>
+          <a class="button" id="openLink" href="#" target="_blank" rel="noreferrer">Open catalog</a>
           <a class="button" id="openPageLink" href="#" target="_blank" rel="noreferrer">Open page</a>
         </div>
       </div>
@@ -1201,6 +1207,13 @@ function customPageURL(name){
   u.searchParams.set("page",name);
   return u.toString();
 }
+function summarizeScope(link){
+  const types=(link.mediaTypes||[]);
+  const libs=(link.libraryIds||[]);
+  const typeText=types.length?types.join(", "):"all media types";
+  const libText=libs.length?("libraries: "+libs.join(", ")):"all libraries";
+  return typeText+" • "+libText;
+}
 async function copyText(value,stateEl,message){
   await navigator.clipboard.writeText(value);
   stateEl.textContent=message;
@@ -1228,6 +1241,16 @@ tokenForm.addEventListener("submit",async event=>{
 });
 copy.addEventListener("click",async()=>{await copyText(urlOut.value,state,"Copied catalog URL")});
 copyPage.addEventListener("click",async()=>{if(pageUrlOut.value)await copyText(pageUrlOut.value,state,"Copied page URL")});
+clearLinkForm.addEventListener("click",()=>{
+  saveName.value="";
+  customHTML.value="";
+  libraryIds.value="";
+  document.querySelector('[name="tokenScope"][value="all"]').checked=true;
+  document.querySelectorAll('[name="mediaTypes"]').forEach(el=>{el.checked=false});
+  syncTokenScope();
+  result.hidden=true;
+  setState("Ready");
+});
 function syncTokenScope(){const custom=document.querySelector('[name="tokenScope"]:checked')?.value==="custom";document.querySelectorAll('[name="mediaTypes"]').forEach(el=>{el.disabled=!custom})}
 document.querySelectorAll('[name="tokenScope"]').forEach(el=>el.addEventListener("change",syncTokenScope));
 syncTokenScope();
@@ -1319,7 +1342,7 @@ function selectSavedLink(link){
   openLink.href=urlOut.value;
   pageUrlOut.value=customPageURL(link.name||"");
   openPageLink.href=pageUrlOut.value||"#";
-  setState("Loaded");
+  setState("Loaded "+(link.name||"link"));
 }
 async function deleteSavedLink(id){
   setLinksState("Deleting");
@@ -1334,16 +1357,20 @@ async function loadSavedLinks(){
     const r=await fetch("api/admin/catalog-links",{headers:headers()});
     const data=await readJSON(r);
     if(!r.ok) throw new Error(data?.error?.message||"Saved links unavailable");
+    const links=Array.isArray(data)?data:[];
     savedLinks.innerHTML="";
-    if(!data.length){savedLinks.innerHTML='<p class="empty-note">No custom links saved yet.</p>';setLinksState("Ready");return}
-    for(const link of data){
+    if(!links.length){savedLinks.innerHTML='<p class="empty-note">No custom links saved yet.</p>';setLinksState("Ready");return}
+    for(const link of links){
       const row=document.createElement("div");
       row.className="saved-link-row";
       const page=customPageURL(link.name||"");
-      row.innerHTML='<div class="saved-link-copy"><strong>'+esc(link.name||"Untitled")+'</strong><span>'+esc(page)+'</span></div><div class="saved-link-actions"><button class="button" type="button" data-act="load">Load</button><button class="button" type="button" data-act="copy">Copy</button><a class="button" data-act="open" target="_blank" rel="noreferrer">Open</a><button class="button danger" type="button" data-act="delete">Delete</button></div>';
-      row.querySelector('[data-act="open"]').href=page;
+      const catalog=absoluteURL(link.url||("catalog?token="+encodeURIComponent(link.token||"")));
+      row.innerHTML='<div class="saved-link-copy"><strong>'+esc(link.name||"Untitled")+'</strong><span>'+esc(page)+'</span><span>'+esc(summarizeScope(link))+'</span></div><div class="saved-link-actions"><button class="button" type="button" data-act="load">Edit</button><button class="button" type="button" data-act="copy-page">Copy page</button><button class="button" type="button" data-act="copy-catalog">Copy catalog</button><a class="button" data-act="open-page" target="_blank" rel="noreferrer">Open page</a><a class="button" data-act="open-catalog" target="_blank" rel="noreferrer">Open catalog</a><button class="button danger" type="button" data-act="delete">Delete</button></div>';
+      row.querySelector('[data-act="open-page"]').href=page;
+      row.querySelector('[data-act="open-catalog"]').href=catalog;
       row.querySelector('[data-act="load"]').addEventListener("click",()=>selectSavedLink(link));
-      row.querySelector('[data-act="copy"]').addEventListener("click",async()=>copyText(page,linksState,"Copied"));
+      row.querySelector('[data-act="copy-page"]').addEventListener("click",async()=>copyText(page,linksState,"Copied page URL"));
+      row.querySelector('[data-act="copy-catalog"]').addEventListener("click",async()=>copyText(catalog,linksState,"Copied catalog URL"));
       row.querySelector('[data-act="delete"]').addEventListener("click",async()=>{try{await deleteSavedLink(link.id)}catch(err){setLinksState("Error",true);alert(err.message||String(err))}});
       savedLinks.appendChild(row);
     }
@@ -1904,7 +1931,7 @@ func css() string {
 }
 
 func adminCSS() string {
-	return `.admin-shell{max-width:1220px}.admin-hero{padding-bottom:24px}.admin-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px}.admin-panel{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.admin-panel h2{margin:0 0 16px}.admin-form{display:grid;gap:16px;justify-items:start}.admin-form label{display:grid;gap:7px;color:var(--muted);width:100%;max-width:100%}.admin-form fieldset{border:1px solid var(--border);border-radius:8px;margin:0;padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;width:100%;box-sizing:border-box}.admin-form legend{color:var(--muted);padding:0 6px}.admin-form input,.admin-form textarea{box-sizing:border-box;width:100%}.settings-row{display:flex;flex-wrap:wrap;align-items:end;gap:12px;width:100%}.compact-row{max-width:560px}.short-field{max-width:150px}.medium-field{max-width:220px}.url-field{max-width:420px}.password-field{max-width:280px}.compact-action{width:auto;min-width:92px;justify-self:start}.check{display:flex!important;align-items:center;gap:8px}.check input{width:auto}.primary{background:var(--primary);border-color:var(--primary-border)}.danger{border-color:#7f2d2d;color:#ffb4b4}.status-pill{display:inline-flex;align-items:center;border:1px solid var(--primary-border);border-radius:999px;color:var(--accent);padding:6px 10px;font-size:12px}.status-pill.bad{border-color:#b54747;color:#ffadad}.result-box,.error-box{margin-top:18px}.result-box textarea{width:100%;box-sizing:border-box;resize:vertical}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}.details{display:grid;grid-template-columns:130px 1fr;gap:10px;margin:0 0 16px}.details dt{color:var(--muted2)}.details dd{margin:0;color:var(--fg);overflow-wrap:anywhere}.compact{margin-top:12px}.error-box{white-space:pre-wrap;border:1px solid #6b2d2d;background:#2b1518;color:#ffc4c4;border-radius:8px;padding:12px}.preview-box{min-height:120px;margin-top:14px;border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:14px;overflow:auto}.slim{grid-template-columns:1fr 1fr}.admin-form .slim{display:grid;gap:12px}.saved-links-panel{grid-column:1/-1}.saved-links{display:grid;gap:10px}.saved-link-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;border:1px solid var(--border);border-radius:8px;background:var(--panel);padding:12px}.saved-link-copy{min-width:0;display:grid;gap:4px}.saved-link-copy strong{font-size:15px}.saved-link-copy span,.empty-note{color:var(--muted);overflow-wrap:anywhere}.saved-link-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.saved-link-actions .button{min-height:36px;padding:7px 10px}@media(max-width:900px){.admin-grid{grid-template-columns:1fr}.slim{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}.saved-link-row{grid-template-columns:1fr}.saved-link-actions{justify-content:flex-start}}@media(max-width:560px){.short-field,.medium-field,.url-field,.password-field{max-width:100%}.compact-action{width:100%}}`
+	return `.admin-shell{max-width:1220px}.admin-hero{padding-bottom:24px}.admin-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px}.admin-panel{border:1px solid var(--border);border-radius:8px;background:var(--panel2);padding:20px}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.panel-note{margin:6px 0 0;color:var(--muted);font-size:13px;line-height:1.5;max-width:54ch}.admin-panel h2{margin:0 0 16px}.admin-form{display:grid;gap:16px;justify-items:start}.admin-form label{display:grid;gap:7px;color:var(--muted);width:100%;max-width:100%}.admin-form fieldset{border:1px solid var(--border);border-radius:8px;margin:0;padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;width:100%;box-sizing:border-box}.admin-form legend{color:var(--muted);padding:0 6px}.admin-form input,.admin-form textarea{box-sizing:border-box;width:100%}.settings-row{display:flex;flex-wrap:wrap;align-items:end;gap:12px;width:100%}.compact-row{max-width:560px}.short-field{max-width:150px}.medium-field{max-width:220px}.url-field{max-width:420px}.password-field{max-width:280px}.compact-action{width:auto;min-width:92px;justify-self:start}.check{display:flex!important;align-items:center;gap:8px}.check input{width:auto}.primary{background:var(--primary);border-color:var(--primary-border)}.danger{border-color:#7f2d2d;color:#ffb4b4}.status-pill{display:inline-flex;align-items:center;border:1px solid var(--primary-border);border-radius:999px;color:var(--accent);padding:6px 10px;font-size:12px}.status-pill.bad{border-color:#b54747;color:#ffadad}.result-box,.error-box{margin-top:18px}.result-box textarea{width:100%;box-sizing:border-box;resize:vertical}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}.details{display:grid;grid-template-columns:130px 1fr;gap:10px;margin:0 0 16px}.details dt{color:var(--muted2)}.details dd{margin:0;color:var(--fg);overflow-wrap:anywhere}.compact{margin-top:12px}.error-box{white-space:pre-wrap;border:1px solid #6b2d2d;background:#2b1518;color:#ffc4c4;border-radius:8px;padding:12px}.preview-box{min-height:120px;margin-top:14px;border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:14px;overflow:auto}.slim{grid-template-columns:1fr 1fr}.admin-form .slim{display:grid;gap:12px}.saved-links-panel{grid-column:1/-1}.saved-links{display:grid;gap:10px}.saved-link-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;border:1px solid var(--border);border-radius:8px;background:var(--panel);padding:12px}.saved-link-copy{min-width:0;display:grid;gap:4px}.saved-link-copy strong{font-size:15px}.saved-link-copy span,.empty-note{color:var(--muted);overflow-wrap:anywhere}.saved-link-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.saved-link-actions .button{min-height:36px;padding:7px 10px}@media(max-width:900px){.admin-grid{grid-template-columns:1fr}.slim{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}.saved-link-row{grid-template-columns:1fr}.saved-link-actions{justify-content:flex-start}}@media(max-width:560px){.short-field,.medium-field,.url-field,.password-field{max-width:100%}.compact-action{width:100%}}`
 }
 
 func adminTheme(r *http.Request) string {
