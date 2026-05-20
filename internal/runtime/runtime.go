@@ -1,31 +1,51 @@
+// Package runtime is the SDK-facing plugin runtime: it owns the GetManifest
+// / Configure RPC, accepts the manifest-supplied config bag, validates it,
+// and hands a normalized Config struct to main.go's onConfig callback.
+//
+// The Config struct is also the persisted shape — store/config.go serialises
+// it as the singleton app_config jsonb row, so adding a field here adds it
+// to the persistent shape automatically.
 package runtime
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sync"
 
 	pluginv1 "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginproto/continuum/plugin/v1"
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimedefault"
 )
 
+// Config is the union of manifest-supplied and DB-persisted plugin settings.
+// DatabaseURL is manifest-only (we can't talk to Postgres until we know its
+// DSN). Everything else round-trips through app_config.data as JSONB.
 type Config struct {
-	DatabaseURL          string
-	TokenSecret          string
-	TokenSecretGenerated bool
-	StandaloneHTTPListen string
-	PublicPort           int
-	PublicBaseURL        string
-	AdHTML               string
-	CatalogPassword      string
-	TokenTTLHours        int
-	EbookInstallationID  string
-	AudioInstallationID  string
+	DatabaseURL             string `json:"-"`
+	TokenSecret             string `json:"token_secret,omitempty"`
+	TokenSecretGenerated    bool   `json:"token_secret_generated,omitempty"`
+	StandaloneHTTPListen    string `json:"standalone_http_listen,omitempty"`
+	PublicPort              int    `json:"public_port,omitempty"`
+	PublicBaseURL           string `json:"public_base_url,omitempty"`
+	AdHTML                  string `json:"ad_html,omitempty"`
+	PublishedHTML           string `json:"published_html,omitempty"`
+	// CatalogPassword carries an operator-supplied plaintext password from
+	// the manifest config or the admin UI. It is never persisted as
+	// plaintext: store.Bootstrap and store.UpdateConfig both hash it into
+	// CatalogPasswordHash on write and clear this field.
+	CatalogPassword string `json:"catalog_password,omitempty"`
+	// CatalogPasswordHash is the bcrypt hash of the catalog password.
+	// Empty when no password has been set.
+	CatalogPasswordHash string `json:"catalog_password_hash,omitempty"`
+	// CatalogPasswordRequired controls whether browsing /catalog needs
+	// the password (or a bypass token). When false the catalog is open
+	// to anyone, regardless of whether a hash is stored. Letting an
+	// operator toggle this without losing the stored hash means they can
+	// temporarily open the catalog and lock it back down later.
+	CatalogPasswordRequired bool   `json:"catalog_password_required"`
+	TokenTTLHours           int    `json:"token_ttl_hours,omitempty"`
+	EbookInstallationID     string `json:"ebook_installation_id,omitempty"`
+	AudioInstallationID     string `json:"audio_installation_id,omitempty"`
 }
 
 type Server struct {
@@ -45,20 +65,17 @@ func (s *Server) GetManifest(context.Context, *pluginv1.GetManifestRequest) (*pl
 	return &pluginv1.GetManifestResponse{Manifest: s.manifest}, nil
 }
 
+// DefaultAppConfig returns the in-code defaults applied when no DB row
+// exists yet.
 func DefaultAppConfig() Config {
 	return Config{TokenTTLHours: 168}
 }
 
+// NormalizeAppConfig validates and canonicalises a Config. It does NOT
+// generate secrets — that's the store's job during Bootstrap, so the
+// persistence layer is the single source of truth for derived state.
 func NormalizeAppConfig(cfg Config) (Config, error) {
-	if cfg.TokenSecret == "" {
-		secret, err := autoTokenSecret()
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.TokenSecret = secret
-		cfg.TokenSecretGenerated = true
-	}
-	if len(cfg.TokenSecret) < 32 {
+	if cfg.TokenSecret != "" && len(cfg.TokenSecret) < 32 {
 		return Config{}, fmt.Errorf("token_secret must be at least 32 characters")
 	}
 	if cfg.PublicBaseURL != "" {
@@ -126,39 +143,6 @@ func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 	s.cfg = cfg
 	s.mu.Unlock()
 	return &pluginv1.ConfigureResponse{}, nil
-}
-
-func autoTokenSecret() (string, error) {
-	path, err := tokenSecretPath()
-	if err != nil {
-		return "", err
-	}
-	if data, err := os.ReadFile(path); err == nil {
-		secret := string(data)
-		if len(secret) >= 32 {
-			return secret, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("read generated token_secret: %w", err)
-	}
-
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate token_secret: %w", err)
-	}
-	secret := hex.EncodeToString(buf)
-	if err := os.WriteFile(path, []byte(secret), 0600); err != nil {
-		return "", fmt.Errorf("persist generated token_secret: %w", err)
-	}
-	return secret, nil
-}
-
-func tokenSecretPath() (string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve executable path: %w", err)
-	}
-	return filepath.Join(filepath.Dir(executable), ".public-catalog-token-secret"), nil
 }
 
 func stringValue(candidates ...any) string {

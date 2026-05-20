@@ -7,14 +7,17 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-func TestConfigureGeneratesTokenSecretWhenMissing(t *testing.T) {
+// Token secret generation is no longer the runtime layer's responsibility —
+// it's persisted to the DB by store.Bootstrap on first run. The runtime
+// only validates that an explicit secret meets the length floor.
+
+func TestConfigureAllowsMissingTokenSecret(t *testing.T) {
 	s := New(nil, func(cfg Config) error {
-		if len(cfg.TokenSecret) < 32 {
-			t.Fatalf("generated token secret length = %d, want at least 32", len(cfg.TokenSecret))
+		if cfg.TokenSecret != "" {
+			t.Fatalf("TokenSecret should pass through empty when not supplied, got %q", cfg.TokenSecret)
 		}
 		return nil
 	})
-
 	if _, err := s.Configure(t.Context(), configureRequest("database_url", map[string]any{"value": "postgres://x"})); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
@@ -23,7 +26,6 @@ func TestConfigureGeneratesTokenSecretWhenMissing(t *testing.T) {
 func TestConfigureRejectsShortExplicitTokenSecret(t *testing.T) {
 	s := New(nil, nil)
 	req := configureRequest("token_secret", map[string]any{"value": "short"})
-
 	if _, err := s.Configure(t.Context(), req); err == nil {
 		t.Fatal("expected short explicit token_secret to fail")
 	}
@@ -40,7 +42,6 @@ func TestConfigureMapsPublicPortToStandaloneListenAddress(t *testing.T) {
 		return nil
 	})
 	req := configureRequest("public_port", map[string]any{"value": float64(8090)})
-
 	if _, err := s.Configure(t.Context(), req); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
@@ -49,7 +50,6 @@ func TestConfigureMapsPublicPortToStandaloneListenAddress(t *testing.T) {
 func TestConfigureRejectsInvalidPublicPort(t *testing.T) {
 	s := New(nil, nil)
 	req := configureRequest("public_port", map[string]any{"value": float64(70000)})
-
 	if _, err := s.Configure(t.Context(), req); err == nil {
 		t.Fatal("expected invalid public_port to fail")
 	}
@@ -63,7 +63,6 @@ func TestConfigureAcceptsCatalogPassword(t *testing.T) {
 		return nil
 	})
 	req := configureRequest("catalog_password", map[string]any{"value": "let-me-in"})
-
 	if _, err := s.Configure(t.Context(), req); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}

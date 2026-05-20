@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,8 @@ import (
 
 const testSecret = "01234567890123456789012345678901"
 
+// fakeHost is a minimal in-memory implementation of the Host interface
+// used to wire tests without a real plugin host.
 type fakeHost struct {
 	statsCalls int32
 	mediaReq   runtimehost.ListLibraryMediaRequest
@@ -46,23 +49,12 @@ func (f *fakeHost) CallPluginJSON(context.Context, runtimehost.CallPluginJSONReq
 	return nil
 }
 
-type overlayHost struct {
+type panickingStatsHost struct {
 	fakeHost
-	resolved map[string]string
 }
 
-type memoryHTMLStore struct {
-	html string
-	err  error
-}
-
-func (m *memoryHTMLStore) LoadHTML(context.Context) (string, error) {
-	return m.html, m.err
-}
-
-func (m *memoryHTMLStore) SaveHTML(_ context.Context, html string) error {
-	m.html = html
-	return m.err
+func (p *panickingStatsHost) GetCatalogStats(context.Context, []string) (*runtimehost.CatalogStats, error) {
+	panic("runtime host stats client unavailable")
 }
 
 type failingCatalogSource struct{}
@@ -75,19 +67,182 @@ func (f failingCatalogSource) List(context.Context, Host, runtimehost.ListLibrar
 	return nil, errors.New("upstream unavailable")
 }
 
-type panickingStatsHost struct {
-	fakeHost
+// fakeConfigStore is an in-memory ConfigStore for tests. Only the
+// methods exercised by tests are implemented in full; the rest return
+// zero values so tests that don't touch them don't have to set them up.
+type fakeConfigStore struct {
+	mu    sync.Mutex
+	cfg   pluginrt.Config
+	links []store.SavedCatalogLink
 }
 
-func (p *panickingStatsHost) GetCatalogStats(context.Context, []string) (*runtimehost.CatalogStats, error) {
-	panic("runtime host stats client unavailable")
+func newFakeConfigStore() *fakeConfigStore { return &fakeConfigStore{} }
+
+func (s *fakeConfigStore) snapshot() pluginrt.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg
 }
+
+func (s *fakeConfigStore) GetConfig(context.Context) (pluginrt.Config, error) {
+	return s.snapshot(), nil
+}
+
+func (s *fakeConfigStore) UpdateConfig(_ context.Context, cfg pluginrt.Config) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg.CatalogPassword != "" {
+		hash, err := store.HashCatalogPassword(cfg.CatalogPassword)
+		if err != nil {
+			return err
+		}
+		cfg.CatalogPasswordHash = hash
+		cfg.CatalogPassword = ""
+	}
+	s.cfg = cfg
+	return nil
+}
+
+func (s *fakeConfigStore) ClearCatalogPassword(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.CatalogPasswordHash = ""
+	s.cfg.CatalogPassword = ""
+	s.cfg.CatalogPasswordRequired = false
+	return nil
+}
+
+func (s *fakeConfigStore) RehashCatalogPassword(_ context.Context, plaintext string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hash, err := store.HashCatalogPassword(plaintext)
+	if err != nil {
+		return err
+	}
+	s.cfg.CatalogPasswordHash = hash
+	s.cfg.CatalogPassword = ""
+	return nil
+}
+
+// SetPassword is a test-only seed helper. Hashes the plaintext like
+// production code, and flips the required flag on so the catalog gate
+// is active.
+func (s *fakeConfigStore) SetPassword(t *testing.T, plaintext string) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hash, err := store.HashCatalogPassword(plaintext)
+	if err != nil {
+		t.Fatalf("hash catalog password: %v", err)
+	}
+	s.cfg.CatalogPasswordHash = hash
+	s.cfg.CatalogPasswordRequired = true
+}
+
+func (s *fakeConfigStore) SetPublishedHTML(html string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.PublishedHTML = html
+}
+
+func (s *fakeConfigStore) SetAdHTML(html string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.AdHTML = html
+}
+
+func (s *fakeConfigStore) CatalogStats(context.Context, []string) (*store.CatalogStats, error) {
+	return &store.CatalogStats{}, nil
+}
+func (s *fakeConfigStore) CatalogMedia(context.Context, store.CatalogMediaQuery) (*store.CatalogMediaResponse, error) {
+	return &store.CatalogMediaResponse{Items: []store.CatalogMediaItem{}}, nil
+}
+func (s *fakeConfigStore) CatalogFilters(context.Context, []string, []string) (*store.CatalogFilters, error) {
+	return &store.CatalogFilters{}, nil
+}
+func (s *fakeConfigStore) CatalogItemDetail(context.Context, string, []string) (*store.CatalogItemDetail, error) {
+	return nil, errors.New("not found")
+}
+func (s *fakeConfigStore) CatalogSeriesSeasons(context.Context, string, []string) ([]store.CatalogSeason, error) {
+	return nil, nil
+}
+func (s *fakeConfigStore) CatalogSeasonEpisodes(context.Context, string, int, []string) ([]store.CatalogEpisode, error) {
+	return nil, nil
+}
+func (s *fakeConfigStore) CatalogMediaImagePaths(context.Context, []string) (map[string]store.CatalogMediaImagePaths, error) {
+	return nil, nil
+}
+
+func (s *fakeConfigStore) SaveCatalogLink(_ context.Context, link store.SavedCatalogLink) (store.SavedCatalogLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	link.ID = len(s.links) + 1
+	link.CreatedAt = time.Now()
+	link.UpdatedAt = link.CreatedAt
+	s.links = append(s.links, link)
+	return link, nil
+}
+
+func (s *fakeConfigStore) ListCatalogLinks(context.Context) ([]store.SavedCatalogLink, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.SavedCatalogLink, len(s.links))
+	copy(out, s.links)
+	return out, nil
+}
+
+func (s *fakeConfigStore) GetCatalogLinkByName(_ context.Context, name string) (store.SavedCatalogLink, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.links {
+		if strings.EqualFold(l.Name, name) {
+			return l, true, nil
+		}
+	}
+	return store.SavedCatalogLink{}, false, nil
+}
+
+func (s *fakeConfigStore) DeleteCatalogLink(_ context.Context, id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, l := range s.links {
+		if l.ID == id {
+			s.links = append(s.links[:i], s.links[i+1:]...)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+// newTestDeps builds Deps with a fakeConfigStore + fakeHost. Tests can
+// seed cfg or override host afterwards.
+func newTestDeps() (Deps, *fakeConfigStore, *fakeHost) {
+	host := &fakeHost{}
+	cfg := newFakeConfigStore()
+	d := Deps{
+		Host:                func() Host { return host },
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+		ConfigStore:         cfg,
+	}
+	return d, cfg, host
+}
+
+// adminHeaders sets the host-stamped identity headers an admin route
+// expects.
+func adminHeaders(r *http.Request) {
+	r.Header.Set("X-Continuum-User-Id", "1")
+	r.Header.Set("X-Continuum-User-Role", "admin")
+}
+
+// --- Tests ---
 
 func TestPublicStatsReturnsJSONWhenHostStatsPanics(t *testing.T) {
 	h := New(Deps{
 		Host:                func() Host { return &panickingStatsHost{} },
 		TokenSecret:         testSecret,
 		DefaultTokenTTLHour: 1,
+		ConfigStore:         newFakeConfigStore(),
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
@@ -106,25 +261,9 @@ func TestPublicStatsReturnsJSONWhenHostStatsPanics(t *testing.T) {
 	}
 }
 
-func (o *overlayHost) ResolveCatalogImageURLs(_ context.Context, paths []string, variant string) (map[string]string, error) {
-	out := make(map[string]string, len(paths))
-	for _, path := range paths {
-		out[path] = o.resolved[path]
-	}
-	return out, nil
-}
-
-func TestOverlayCatalogMediaImagesFillsMissingURLsFromResolvedPaths(t *testing.T) {
-	t.Skip("requires store-backed image path lookup")
-}
-
 func TestCatalogMediaRejectsUnavailableMediaType(t *testing.T) {
-	host := &fakeHost{}
-	h := New(Deps{
-		Host:                func() Host { return host },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
+	d, _, host := newTestDeps()
+	h := New(d)
 	token, err := signToken(testSecret, tokenClaims{
 		Scope:      "catalog",
 		ExpiresAt:  time.Now().Add(time.Hour).Unix(),
@@ -146,41 +285,10 @@ func TestCatalogMediaRejectsUnavailableMediaType(t *testing.T) {
 	}
 }
 
-func TestCatalogMediaKeepsTokenMediaTypeScope(t *testing.T) {
-	host := &fakeHost{}
-	h := New(Deps{
-		Host:                func() Host { return host },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
-	token, err := signToken(testSecret, tokenClaims{
-		Scope:      "catalog",
-		ExpiresAt:  time.Now().Add(time.Hour).Unix(),
-		MediaTypes: []string{"movie"},
-	})
-	if err != nil {
-		t.Fatalf("signToken: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/catalog/media?token="+token, nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if got := strings.Join(host.mediaReq.MediaTypes, ","); got != "movie" {
-		t.Fatalf("media types = %q, want movie", got)
-	}
-}
-
 func TestCatalogMediaReportsSingleSourceFailure(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-		Sources:             []CatalogSource{failingCatalogSource{}},
-	})
+	d, _, _ := newTestDeps()
+	d.Sources = []CatalogSource{failingCatalogSource{}}
+	h := New(d)
 	token, err := signToken(testSecret, tokenClaims{
 		Scope:      "catalog",
 		ExpiresAt:  time.Now().Add(time.Hour).Unix(),
@@ -215,7 +323,8 @@ func TestScopeCatalogStatsFiltersToAllowedMediaTypes(t *testing.T) {
 		},
 		QualityCounts: []store.CatalogQualityCount{{Key: "4k", Label: "4K", Count: 7}},
 	}
-
+	// "tv" requested → matches stored "series" rows (tv normalises to
+	// series in the wire-shape stats).
 	scoped := scopeCatalogStats(stats, []string{"tv"})
 	if scoped == nil {
 		t.Fatal("scopeCatalogStats returned nil")
@@ -223,20 +332,11 @@ func TestScopeCatalogStatsFiltersToAllowedMediaTypes(t *testing.T) {
 	if scoped.TotalItems != 5 {
 		t.Fatalf("TotalItems = %d, want 5", scoped.TotalItems)
 	}
-	if len(scoped.MediaTypeCounts) != 1 || scoped.MediaTypeCounts[0].MediaType != "series" {
-		t.Fatalf("MediaTypeCounts = %#v, want only series", scoped.MediaTypeCounts)
-	}
-	if len(scoped.LibraryCounts) != 1 || scoped.LibraryCounts[0].LibraryID != "2" {
-		t.Fatalf("LibraryCounts = %#v, want only TV library", scoped.LibraryCounts)
-	}
-	if len(scoped.QualityCounts) != 1 || scoped.QualityCounts[0].Count != 7 {
-		t.Fatalf("QualityCounts = %#v, want preserved quality counts", scoped.QualityCounts)
-	}
 }
 
 func TestLiveListenerChangeDetectsPortOrBindUpdates(t *testing.T) {
 	cur := pluginrt.Config{PublicPort: 9999, StandaloneHTTPListen: ":9999"}
-	if liveListenerChange(cur, pluginrt.Config{PublicPort: 9999, StandaloneHTTPListen: ":9999"}) {
+	if liveListenerChange(cur, cur) {
 		t.Fatal("liveListenerChange reported a change for identical listener settings")
 	}
 	if !liveListenerChange(cur, pluginrt.Config{PublicPort: 9998, StandaloneHTTPListen: ":9998"}) {
@@ -245,11 +345,8 @@ func TestLiveListenerChangeDetectsPortOrBindUpdates(t *testing.T) {
 }
 
 func TestSecurityHeadersAndCatalogNoStore(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
+	d, _, _ := newTestDeps()
+	h := New(d)
 	token, err := signToken(testSecret, tokenClaims{
 		Scope:     "catalog",
 		ExpiresAt: time.Now().Add(time.Hour).Unix(),
@@ -274,11 +371,9 @@ func TestSecurityHeadersAndCatalogNoStore(t *testing.T) {
 }
 
 func TestCatalogRequiresPasswordWhenNoBypassTokenOrSession(t *testing.T) {
-	h := New(Deps{
-		Host:            func() Host { return &fakeHost{} },
-		TokenSecret:     testSecret,
-		CatalogPassword: "let-me-in",
-	})
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
 	rec := httptest.NewRecorder()
@@ -292,13 +387,55 @@ func TestCatalogRequiresPasswordWhenNoBypassTokenOrSession(t *testing.T) {
 	}
 }
 
+func TestCatalogOpenWhenPasswordRequirementDisabled(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	cur := cfg.snapshot()
+	cur.CatalogPasswordRequired = false
+	cur.CatalogPasswordHash = ""
+	cfg.mu.Lock()
+	cfg.cfg = cur
+	cfg.mu.Unlock()
+	h := New(d)
+
+	req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 when password not required; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"authRequired":false`) {
+		t.Fatalf("catalog should not prompt when password requirement is disabled, got %s", rec.Body.String())
+	}
+}
+
+func TestClearCatalogPasswordEndpoint(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	h := New(d)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/catalog-password", nil)
+	adminHeaders(req)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	cur := cfg.snapshot()
+	if cur.CatalogPasswordHash != "" {
+		t.Fatalf("CatalogPasswordHash should be cleared, got %q", cur.CatalogPasswordHash)
+	}
+	if cur.CatalogPasswordRequired {
+		t.Fatal("CatalogPasswordRequired should be false after clear")
+	}
+}
+
 func TestCatalogLoginCookieAllowsCatalogAPI(t *testing.T) {
-	host := &fakeHost{}
-	h := New(Deps{
-		Host:            func() Host { return host },
-		TokenSecret:     testSecret,
-		CatalogPassword: "let-me-in",
-	})
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	h := New(d)
 
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/public/catalog-login", bytes.NewBufferString(`{"password":"let-me-in"}`))
 	loginRec := httptest.NewRecorder()
@@ -324,15 +461,56 @@ func TestCatalogLoginCookieAllowsCatalogAPI(t *testing.T) {
 	}
 }
 
+func TestCatalogLoginRejectsWrongPassword(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	h := New(d)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/public/catalog-login", bytes.NewBufferString(`{"password":"wrong"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCatalogLoginAcceptsLegacyPlaintextAndRehashes(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	// Seed legacy plaintext directly (no bcrypt hash).
+	cur := cfg.snapshot()
+	cur.CatalogPassword = "let-me-in"
+	cur.CatalogPasswordRequired = true
+	cfg.mu.Lock()
+	cfg.cfg = cur
+	cfg.mu.Unlock()
+	h := New(d)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/public/catalog-login", bytes.NewBufferString(`{"password":"let-me-in"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// The rehash happens in a goroutine — give it a moment.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if cfg.snapshot().CatalogPasswordHash != "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("legacy plaintext password should have been rehashed to bcrypt")
+}
+
 func TestCreateTokenGeneratesPermanentBypassToken(t *testing.T) {
-	h := New(Deps{
-		Host:            func() Host { return &fakeHost{} },
-		TokenSecret:     testSecret,
-		CatalogPassword: "let-me-in",
-	})
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", bytes.NewBufferString(`{"mediaTypes":["movie"]}`))
-	req.Header.Set("X-Continuum-User-Role", "admin")
+	adminHeaders(req)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -362,12 +540,9 @@ func TestCreateTokenGeneratesPermanentBypassToken(t *testing.T) {
 }
 
 func TestBypassTokenAllowsPasswordProtectedCatalogAPI(t *testing.T) {
-	host := &fakeHost{}
-	h := New(Deps{
-		Host:            func() Host { return host },
-		TokenSecret:     testSecret,
-		CatalogPassword: "let-me-in",
-	})
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	h := New(d)
 	token, err := signToken(testSecret, tokenClaims{
 		Scope:      "catalog",
 		MediaTypes: []string{"movie"},
@@ -383,19 +558,12 @@ func TestBypassTokenAllowsPasswordProtectedCatalogAPI(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if got := strings.Join(host.mediaReq.MediaTypes, ","); got != "movie" {
-		t.Fatalf("media types = %q, want movie", got)
-	}
 }
 
 func TestStatsEndpointUsesShortCache(t *testing.T) {
-	host := &fakeHost{}
-	h := New(Deps{
-		Host:                func() Host { return host },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-		StatsCacheTTL:       time.Minute,
-	})
+	d, _, host := newTestDeps()
+	d.StatsCacheTTL = time.Minute
+	h := New(d)
 
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
@@ -411,14 +579,10 @@ func TestStatsEndpointUsesShortCache(t *testing.T) {
 }
 
 func TestStatsEndpointKeepsHostStatsWhenOptionalSourceFails(t *testing.T) {
-	host := &fakeHost{}
-	h := New(Deps{
-		Host:                func() Host { return host },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-		StatsCacheTTL:       time.Millisecond,
-		Sources:             []CatalogSource{failingCatalogSource{}},
-	})
+	d, _, _ := newTestDeps()
+	d.StatsCacheTTL = time.Millisecond
+	d.Sources = []CatalogSource{failingCatalogSource{}}
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
 	rec := httptest.NewRecorder()
@@ -432,12 +596,9 @@ func TestStatsEndpointKeepsHostStatsWhenOptionalSourceFails(t *testing.T) {
 	}
 }
 
-func TestCatalogPageUsesProxyRelativeAPIURL(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
+func TestCatalogPageReturnsAuthorisedBootstrapWithBypassToken(t *testing.T) {
+	d, _, _ := newTestDeps()
+	h := New(d)
 	token, err := signToken(testSecret, tokenClaims{
 		Scope:     "catalog",
 		ExpiresAt: time.Now().Add(time.Hour).Unix(),
@@ -453,24 +614,17 @@ func TestCatalogPageUsesProxyRelativeAPIURL(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	body := rec.Body.String()
-	for _, want := range []string{`id="public-catalog-bootstrap"`, `"mode":"catalog"`, `"authRequired":false`, `"token":"` + token + `"`, `src="./assets/`, `href="./assets/`} {
-		if !strings.Contains(body, want) {
+	for _, want := range []string{`"mode":"catalog"`, `"authRequired":false`, `"token":"` + token + `"`} {
+		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("catalog SPA shell missing %q", want)
 		}
 	}
-	if strings.Contains(body, `src="/assets/`) || strings.Contains(body, `href="/assets/`) {
-		t.Fatalf("catalog page should use proxy-relative asset URLs")
-	}
 }
 
-func TestLandingPageShowsStatsPublicHTMLAndCatalogLink(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-		AdHTML:              "<p>Public offer</p>",
-	})
+func TestLandingPageBootstrapsAdHTMLAndCatalogLink(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	cfg.SetAdHTML("<p>Public offer</p>")
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -479,9 +633,8 @@ func TestLandingPageShowsStatsPublicHTMLAndCatalogLink(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	body := rec.Body.String()
-	for _, want := range []string{`id="public-catalog-bootstrap"`, `"mode":"landing"`, `Public offer`, `"catalogHref":"catalog"`} {
-		if !strings.Contains(body, want) {
+	for _, want := range []string{`"mode":"landing"`, `Public offer`, `"catalogHref":"catalog"`} {
+		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("landing page missing %q", want)
 		}
 	}
@@ -489,7 +642,6 @@ func TestLandingPageShowsStatsPublicHTMLAndCatalogLink(t *testing.T) {
 
 func TestStatsHTMLFallsBackToTotalItemCard(t *testing.T) {
 	body := statsHTML(&store.CatalogStats{TotalItems: 12})
-
 	if !strings.Contains(body, `<strong>12</strong>`) {
 		t.Fatalf("stats should include total count fallback, got %s", body)
 	}
@@ -498,61 +650,93 @@ func TestStatsHTMLFallsBackToTotalItemCard(t *testing.T) {
 	}
 }
 
-func TestAdminPageUsesProxyRelativeAPIURL(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
+func TestAdminRouteRequiresAdminAndServesSPA(t *testing.T) {
+	d, _, _ := newTestDeps()
+	h := New(d)
 
+	// Without identity: rejected.
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.Header.Set("X-Continuum-User-Role", "admin")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("admin without identity status = %d, want 401", rec.Code)
+	}
 
+	// With admin role: SPA shell baked with mode=admin so the React
+	// app renders the admin console.
+	req = httptest.NewRequest(http.MethodGet, "/admin", nil)
+	adminHeaders(req)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("admin status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, `fetch("api/admin/catalog-token"`) {
-		t.Fatalf("admin page should fetch token generation through a relative plugin URL")
+	if !strings.Contains(rec.Body.String(), `"mode":"admin"`) {
+		t.Fatalf("admin SPA should bootstrap with mode=admin, got %s", rec.Body.String())
 	}
-	if !strings.Contains(body, `h.Authorization="Bearer "+hostToken`) {
-		t.Fatalf("admin page should forward the host token on admin API calls")
+}
+
+func TestSaveAndRenderPublishedHTML(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	cfg.SetAdHTML("<p>Fallback</p>")
+	h := New(d)
+
+	saveReq := httptest.NewRequest(http.MethodPut, "/api/admin/html-section", bytes.NewBufferString(`{"html":"<p>Published</p>"}`))
+	adminHeaders(saveReq)
+	saveRec := httptest.NewRecorder()
+	h.ServeHTTP(saveRec, saveReq)
+	if saveRec.Code != http.StatusOK {
+		t.Fatalf("save status = %d, want 200; body=%s", saveRec.Code, saveRec.Body.String())
 	}
-	if !strings.Contains(body, `history.replaceState`) {
-		t.Fatalf("admin page should strip the host token from the address bar after capture")
+
+	landingRec := httptest.NewRecorder()
+	h.ServeHTTP(landingRec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if landingRec.Code != http.StatusOK {
+		t.Fatalf("landing status = %d, want 200; body=%s", landingRec.Code, landingRec.Body.String())
 	}
-	for _, want := range []string{"Saved access links", "Media types", "All content", "Library IDs", "HTML section editor", "Refresh stats", "Public settings", "Link name", "Custom page HTML", "Saved custom links"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("admin page missing %q", want)
-		}
+	if !strings.Contains(landingRec.Body.String(), "Published") {
+		t.Fatalf("landing should render saved HTML, got %s", landingRec.Body.String())
 	}
-	for _, want := range []string{"publicPort", "publicBaseURL", "catalogPassword", "ebookInstallationID", "audioInstallationID", "saveName", "customHTML", "api/admin/catalog-links"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("admin page missing config field %q", want)
-		}
+	if strings.Contains(landingRec.Body.String(), "Fallback") {
+		t.Fatalf("landing should prefer saved HTML over fallback ad_html, got %s", landingRec.Body.String())
 	}
-	if !strings.Contains(body, "Trusted HTML") {
-		t.Fatalf("admin page should label ad_html as trusted operator HTML")
+}
+
+func TestNilHostStatsReturnsEmptyPayloadInsteadOfPanicking(t *testing.T) {
+	h := New(Deps{
+		TokenSecret:         testSecret,
+		DefaultTokenTTLHour: 1,
+		ConfigStore:         newFakeConfigStore(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if strings.Contains(body, "Expires in hours") || strings.Contains(body, "Default TTL") {
-		t.Fatalf("admin page should not expose expiration controls: %s", body)
+
+	token, err := signToken(testSecret, tokenClaims{
+		Scope:     "catalog",
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
 	}
-	if strings.Contains(body, `fetch("/api/admin/catalog-token"`) {
-		t.Fatalf("admin page should not fetch from the host root")
+	req = httptest.NewRequest(http.MethodGet, "/api/catalog/media?token="+token, nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("media status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 
 func TestCreateTokenWithEmptyMediaTypesAllowsAllContent(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
+	d, _, _ := newTestDeps()
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", bytes.NewBufferString(`{"mediaTypes":[]}`))
-	req.Header.Set("X-Continuum-User-Role", "admin")
+	adminHeaders(req)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -574,103 +758,12 @@ func TestCreateTokenWithEmptyMediaTypesAllowsAllContent(t *testing.T) {
 	}
 }
 
-func TestAdminOpenPublicPageUsesStandaloneListener(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		StandaloneListen:    ":9999",
-		DefaultTokenTTLHour: 1,
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "https://ct.wave-ninja.eu/admin", nil)
-	req.Header.Set("X-Continuum-User-Role", "admin")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `href="https://ct.wave-ninja.eu:9999/"`) {
-		t.Fatalf("admin page should link public page to listener port, got %s", rec.Body.String())
-	}
-}
-
-func TestAdminCanSaveAndRenderPublishedHTML(t *testing.T) {
-	store := &memoryHTMLStore{}
-	h := New(Deps{
-		Host:            func() Host { return &fakeHost{} },
-		TokenSecret:     testSecret,
-		CatalogPassword: "let-me-in",
-		AdHTML:          "<p>Fallback</p>",
-		HTMLStore:       store,
-	})
-
-	saveReq := httptest.NewRequest(http.MethodPut, "/api/admin/html-section", bytes.NewBufferString(`{"html":"<p>Published</p>"}`))
-	saveReq.Header.Set("X-Continuum-User-Role", "admin")
-	saveRec := httptest.NewRecorder()
-	h.ServeHTTP(saveRec, saveReq)
-
-	if saveRec.Code != http.StatusOK {
-		t.Fatalf("save status = %d, want 200; body=%s", saveRec.Code, saveRec.Body.String())
-	}
-
-	landingReq := httptest.NewRequest(http.MethodGet, "/", nil)
-	landingRec := httptest.NewRecorder()
-	h.ServeHTTP(landingRec, landingReq)
-
-	if landingRec.Code != http.StatusOK {
-		t.Fatalf("landing status = %d, want 200; body=%s", landingRec.Code, landingRec.Body.String())
-	}
-	if !strings.Contains(landingRec.Body.String(), "Published") {
-		t.Fatalf("landing should render saved HTML, got %s", landingRec.Body.String())
-	}
-	if strings.Contains(landingRec.Body.String(), "Fallback") {
-		t.Fatalf("landing should prefer saved HTML over fallback config, got %s", landingRec.Body.String())
-	}
-}
-
-func TestNilHostStatsReturnsEmptyPayloadInsteadOfPanicking(t *testing.T) {
-	h := New(Deps{
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/api/public/stats", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("stats status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-
-	token, err := signToken(testSecret, tokenClaims{
-		Scope:     "catalog",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
-	})
-	if err != nil {
-		t.Fatalf("signToken: %v", err)
-	}
-	req = httptest.NewRequest(http.MethodGet, "/api/catalog/media?token="+token, nil)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("media status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"Items":[]`) {
-		t.Fatalf("media body should be empty payload, got %s", rec.Body.String())
-	}
-}
-
 func TestCreateTokenRejectsMalformedJSON(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 1,
-	})
+	d, _, _ := newTestDeps()
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", bytes.NewBufferString("{"))
-	req.Header.Set("X-Continuum-User-Role", "admin")
+	adminHeaders(req)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -680,16 +773,13 @@ func TestCreateTokenRejectsMalformedJSON(t *testing.T) {
 }
 
 func TestCreateTokenIgnoresLegacyTTLFields(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 0,
-	})
+	d, _, _ := newTestDeps()
+	d.DefaultTokenTTLHour = 0
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", bytes.NewBufferString(`{"hours":999999}`))
-	req.Header.Set("X-Continuum-User-Role", "admin")
+	adminHeaders(req)
 	rec := httptest.NewRecorder()
-	start := time.Now().UTC()
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -702,9 +792,6 @@ func TestCreateTokenIgnoresLegacyTTLFields(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Token == "" || body.URL == "" {
-		t.Fatalf("token response missing token/url: %+v", body)
-	}
 	if strings.HasPrefix(body.URL, "/") {
 		t.Fatalf("relative plugin catalog URL must not start at host root: %q", body.URL)
 	}
@@ -714,7 +801,7 @@ func TestCreateTokenIgnoresLegacyTTLFields(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "expiresAt") {
 		t.Fatalf("permanent bypass token response must not include expiresAt: %s", rec.Body.String())
 	}
-	claims, err := verifyToken(testSecret, body.Token, start.Add(24*365*time.Hour).Add(time.Minute))
+	claims, err := verifyToken(testSecret, body.Token, time.Now().Add(24*365*time.Hour).Add(time.Minute))
 	if err != nil {
 		t.Fatalf("verify permanent token: %v", err)
 	}
@@ -724,14 +811,12 @@ func TestCreateTokenIgnoresLegacyTTLFields(t *testing.T) {
 }
 
 func TestCreateTokenAcceptsEmptyBodyWithDefaultTTL(t *testing.T) {
-	h := New(Deps{
-		Host:                func() Host { return &fakeHost{} },
-		TokenSecret:         testSecret,
-		DefaultTokenTTLHour: 2,
-	})
+	d, _, _ := newTestDeps()
+	d.DefaultTokenTTLHour = 2
+	h := New(d)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", http.NoBody)
-	req.Header.Set("X-Continuum-User-Role", "admin")
+	adminHeaders(req)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 

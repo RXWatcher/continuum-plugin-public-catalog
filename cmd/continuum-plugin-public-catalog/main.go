@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	sdkruntime "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtime"
 
 	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/httproutes"
+	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/migrate"
 	pluginrt "github.com/ContinuumApp/continuum-plugin-public-catalog/internal/runtime"
 	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/server"
 	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
@@ -46,13 +46,19 @@ func main() {
 	var standaloneAddr atomic.Value
 	var standaloneSrv atomic.Pointer[http.Server]
 	var poolPtr atomic.Pointer[pgxpool.Pool]
-	htmlStore := server.NewFileHTMLStore(contentPath(".public-catalog-html-section"))
 
 	var applyConfig func(pluginrt.Config) error
 	applyConfig = func(cfg pluginrt.Config) error {
 		ctx := context.Background()
 		databaseURL := cfg.DatabaseURL
-		pcfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+
+		// Run migrations first so the schema exists before we open the
+		// pool with our typed code paths.
+		if err := migrate.Run(ctx, databaseURL); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+
+		pcfg, err := pgxpool.ParseConfig(databaseURL)
 		if err != nil {
 			return fmt.Errorf("parse database_url: %w", err)
 		}
@@ -63,17 +69,19 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("connect database: %w", err)
 		}
-		if err := store.Migrate(ctx, pool); err != nil {
-			pool.Close()
-			return fmt.Errorf("migrate: %w", err)
-		}
 		st := store.New(pool)
-		cfg, err = st.ImportLegacyConfig(ctx, cfg)
+
+		// Bootstrap merges manifest values, generates the token secret if
+		// missing, and upgrades any legacy plaintext password into a
+		// bcrypt hash. After this returns, cfg is the canonical config
+		// that survives reinstalls.
+		cfg, err = st.Bootstrap(ctx, cfg)
 		if err != nil {
 			pool.Close()
-			return fmt.Errorf("import app config: %w", err)
+			return fmt.Errorf("bootstrap config: %w", err)
 		}
 		cfg.DatabaseURL = databaseURL
+
 		sources := []server.CatalogSource{}
 		if id, err := strconv.Atoi(cfg.EbookInstallationID); err == nil && id > 0 {
 			sources = append(sources, server.NewRuntimeHostSource("ebook", id))
@@ -85,19 +93,15 @@ func main() {
 			Host: func() server.Host {
 				return sdkruntime.Host()
 			},
-			DatabaseURL:          cfg.DatabaseURL,
-			Logger:               logger,
-			TokenSecret:          cfg.TokenSecret,
-			TokenSecretGenerated: cfg.TokenSecretGenerated,
-			PublicBaseURL:        cfg.PublicBaseURL,
-			AdHTML:               cfg.AdHTML,
-			CatalogPassword:      cfg.CatalogPassword,
-			StandaloneListen:     cfg.StandaloneHTTPListen,
-			DefaultTokenTTLHour:  cfg.TokenTTLHours,
-			Sources:              sources,
-			HTMLStore:            htmlStore,
-			ConfigStore:          st,
-			ApplyConfig:          applyConfig,
+			DatabaseURL:         cfg.DatabaseURL,
+			Logger:              logger,
+			TokenSecret:         cfg.TokenSecret,
+			PublicBaseURL:       cfg.PublicBaseURL,
+			StandaloneListen:    cfg.StandaloneHTTPListen,
+			DefaultTokenTTLHour: cfg.TokenTTLHours,
+			Sources:             sources,
+			ConfigStore:         st,
+			ApplyConfig:         applyConfig,
 		}))
 
 		if addr := cfg.StandaloneHTTPListen; addr != "" {
@@ -156,14 +160,6 @@ func main() {
 			HttpRoutes: httpSrv,
 		},
 	})
-}
-
-func contentPath(name string) string {
-	executable, err := os.Executable()
-	if err != nil {
-		return name
-	}
-	return filepath.Join(filepath.Dir(executable), name)
 }
 
 func loadManifest() (*pluginv1.PluginManifest, error) {

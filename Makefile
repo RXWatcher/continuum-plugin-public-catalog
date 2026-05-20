@@ -1,19 +1,26 @@
 BINARY := continuum-plugin-public-catalog
 GO ?= go
-NPM ?= npm
+PNPM ?= pnpm
 
-.PHONY: build test clean
+.PHONY: build web-deps web-build test test-go test-web clean
 
-node_modules/.package-lock.json: package.json package-lock.json
-	$(NPM) ci
-
-build: node_modules/.package-lock.json
-	$(NPM) run build
+build: web-build
 	$(GO) build -o $(BINARY) ./cmd/continuum-plugin-public-catalog
 
-test: node_modules/.package-lock.json
-	$(NPM) run build
+web-deps:
+	cd web && $(PNPM) install --frozen-lockfile
+
+web-build: web-deps
+	cd web && $(PNPM) build
+
+test: test-go test-web
+
+test-go:
 	$(GO) test ./...
+
+test-web:
+	cd web && $(PNPM) run test
 
 clean:
 	rm -f $(BINARY)
+	rm -rf web/node_modules internal/server/public/dist

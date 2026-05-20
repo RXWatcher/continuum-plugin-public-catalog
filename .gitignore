@@ -1,2 +1,5 @@
 /continuum-plugin-public-catalog
-node_modules/
+/web/node_modules
+/web/dist
+/web/*.tsbuildinfo
+/internal/server/public/dist
