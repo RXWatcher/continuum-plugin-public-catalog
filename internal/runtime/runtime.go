@@ -10,7 +10,9 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
+	"strings"
 	"sync"
 
 	pluginv1 "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginproto/continuum/plugin/v1"
@@ -90,10 +92,57 @@ func NormalizeAppConfig(cfg Config) (Config, error) {
 	if cfg.PublicPort > 0 && cfg.StandaloneHTTPListen == "" {
 		cfg.StandaloneHTTPListen = fmt.Sprintf(":%d", cfg.PublicPort)
 	}
+	// Pre-validate the resolved listener address so a typo (`127001:8090`,
+	// `:99999`, missing port) fails the Configure RPC cleanly instead of
+	// surfacing async in a goroutine log a few seconds after start.
+	if cfg.StandaloneHTTPListen != "" {
+		if err := validateListenAddr(cfg.StandaloneHTTPListen); err != nil {
+			return Config{}, fmt.Errorf("standalone_http_listen %q is invalid: %w", cfg.StandaloneHTTPListen, err)
+		}
+	}
 	if cfg.TokenTTLHours < 1 {
 		cfg.TokenTTLHours = 168
 	}
 	return cfg, nil
+}
+
+// validateListenAddr catches syntactic problems with the configured
+// listen address (`:8090`, `host:8090`, `[::1]:8090`) without doing
+// DNS or trying to bind. A bad hostname that resolves at bind time
+// still gets caught synchronously in main.go's net.Listen call; this
+// just rejects shapes that can't possibly bind.
+func validateListenAddr(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("address is empty")
+	}
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("must include host:port (use `:8090` for any host)")
+	}
+	port, err := net.LookupPort("tcp", portStr)
+	if err != nil {
+		return fmt.Errorf("port %q invalid: %w", portStr, err)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port %d out of range", port)
+	}
+	return nil
+}
+
+// IsWildcardListen reports whether the configured listen address binds
+// to every interface (the `:port` shorthand or an explicit `0.0.0.0` /
+// `[::]`). main.go warns on this — the README recommends loopback.
+func IsWildcardListen(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	return host == "" || host == "0.0.0.0" || host == "::"
 }
 
 func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*pluginv1.ConfigureResponse, error) {

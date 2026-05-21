@@ -810,6 +810,64 @@ func TestCreateTokenIgnoresLegacyTTLFields(t *testing.T) {
 	}
 }
 
+func TestCreateTokenReturnsRelativeURLWhenListenerIsWildcardAndNoPublicBaseURL(t *testing.T) {
+	// `:8090` (and `0.0.0.0:8090`) bind every interface — the request
+	// Host header could be the admin host, the public host, or anything
+	// in between, so synthesising an absolute URL from it would silently
+	// generate misleading bypass links. The handler must keep the URL
+	// plugin-relative until the operator sets `public_base_url`.
+	for _, addr := range []string{":8090", "0.0.0.0:8090"} {
+		t.Run(addr, func(t *testing.T) {
+			d, _, _ := newTestDeps()
+			d.StandaloneListen = addr
+			h := New(d)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", http.NoBody)
+			adminHeaders(req)
+			req.Host = "admin.example:8443"
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				URL string `json:"url"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !strings.HasPrefix(body.URL, "catalog?token=") {
+				t.Fatalf("URL = %q, want plugin-relative catalog link", body.URL)
+			}
+		})
+	}
+}
+
+func TestCreateTokenUsesPublicBaseURLWhenSet(t *testing.T) {
+	d, _, _ := newTestDeps()
+	d.PublicBaseURL = "https://catalog.example.com"
+	h := New(d)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-token", http.NoBody)
+	adminHeaders(req)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.HasPrefix(body.URL, "https://catalog.example.com/catalog?token=") {
+		t.Fatalf("URL = %q, want PublicBaseURL prefix", body.URL)
+	}
+}
+
 func TestCreateTokenAcceptsEmptyBodyWithDefaultTTL(t *testing.T) {
 	d, _, _ := newTestDeps()
 	d.DefaultTokenTTLHour = 2

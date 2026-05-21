@@ -68,6 +68,51 @@ func TestConfigureAcceptsCatalogPassword(t *testing.T) {
 	}
 }
 
+func TestValidateListenAddrAcceptsTypicalForms(t *testing.T) {
+	for _, addr := range []string{":8090", "127.0.0.1:8090", "[::1]:8090", "host.example:8090"} {
+		if err := validateListenAddr(addr); err != nil {
+			t.Errorf("validateListenAddr(%q) = %v, want nil", addr, err)
+		}
+	}
+}
+
+func TestValidateListenAddrRejectsMalformedAndOutOfRange(t *testing.T) {
+	cases := []string{
+		"",
+		"8090",      // bare port, no host:port shape
+		":99999",    // out-of-range port
+		":abc",      // non-numeric port
+		"127.0.0.1", // missing port
+	}
+	for _, addr := range cases {
+		if err := validateListenAddr(addr); err == nil {
+			t.Errorf("validateListenAddr(%q) accepted; want error", addr)
+		}
+	}
+}
+
+func TestNormalizeAppConfigRejectsBadListenAddr(t *testing.T) {
+	_, err := NormalizeAppConfig(Config{StandaloneHTTPListen: ":99999"})
+	if err == nil {
+		t.Fatal("NormalizeAppConfig accepted :99999; want validation error")
+	}
+}
+
+func TestIsWildcardListen(t *testing.T) {
+	wildcards := []string{":8090", "0.0.0.0:8090", "[::]:8090"}
+	for _, a := range wildcards {
+		if !IsWildcardListen(a) {
+			t.Errorf("IsWildcardListen(%q) = false, want true", a)
+		}
+	}
+	specific := []string{"", "127.0.0.1:8090", "[::1]:8090", "host.example:8090"}
+	for _, a := range specific {
+		if IsWildcardListen(a) {
+			t.Errorf("IsWildcardListen(%q) = true, want false", a)
+		}
+	}
+}
+
 func configureRequest(key string, value map[string]any) *pluginv1.ConfigureRequest {
 	v, err := structpb.NewStruct(value)
 	if err != nil {

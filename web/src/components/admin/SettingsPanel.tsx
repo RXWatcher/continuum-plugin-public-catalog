@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,8 +14,9 @@ type Props = {
 
 // SettingsPanel edits the operator-tunable bits of plugin config that
 // AREN'T the password (that lives in its own card). Listener settings
-// are read-only on this surface — they need a plugin restart, so the
-// admin sees them but can't accidentally change them mid-run.
+// are surfaced read-only — they need a plugin restart, so the admin
+// sees what's bound but can't change it through the API
+// (hUpdateConfig server-side rejects the change with the same wording).
 export function SettingsPanel({ value, onSave }: Props) {
   const [form, setForm] = useState<Partial<PluginConfig>>({
     public_base_url: value.public_base_url ?? "",
@@ -24,6 +26,9 @@ export function SettingsPanel({ value, onSave }: Props) {
   });
   const [submitting, setSubmitting] = useState(false);
 
+  const listenerLabel = formatListener(value);
+  const listenerWildcard = isWildcardListen(value.standalone_http_listen, value.public_port);
+
   return (
     <Card>
       <CardHeader>
@@ -32,7 +37,27 @@ export function SettingsPanel({ value, onSave }: Props) {
           Public base URL, federated source IDs, and bypass-link expiry.
         </p>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-5">
+        <div className="rounded-md border border-border bg-card px-3 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium">Standalone HTTP listener</p>
+            <Badge variant={listenerLabel === "Not configured" ? "outline" : "secondary"}>
+              {listenerLabel}
+            </Badge>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Set in the manifest (<code>public_port</code> /{" "}
+            <code>standalone_http_listen</code>). Changes require a plugin restart.
+          </p>
+          {listenerWildcard && (
+            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+              Listener bound to <strong>all interfaces</strong>. Prefer
+              <code className="mx-1">127.0.0.1:port</code> behind a reverse proxy
+              unless this is intentional.
+            </p>
+          )}
+        </div>
+
         <form
           className="space-y-4"
           onSubmit={async (e) => {
@@ -99,4 +124,20 @@ export function SettingsPanel({ value, onSave }: Props) {
       </CardContent>
     </Card>
   );
+}
+
+function formatListener(value: PluginConfig): string {
+  const explicit = value.standalone_http_listen?.trim();
+  if (explicit) return explicit;
+  if (value.public_port && value.public_port > 0) return `:${value.public_port}`;
+  return "Not configured";
+}
+
+function isWildcardListen(addr: string | undefined, port: number | undefined): boolean {
+  if (!addr || !addr.trim()) return Boolean(port && port > 0);
+  // ":8090" / "0.0.0.0:8090" / "[::]:8090" bind every interface.
+  if (/^:\d+$/.test(addr.trim())) return true;
+  if (/^0\.0\.0\.0:\d+$/.test(addr.trim())) return true;
+  if (/^\[::\]:\d+$/.test(addr.trim())) return true;
+  return false;
 }

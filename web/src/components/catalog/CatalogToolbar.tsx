@@ -29,6 +29,16 @@ type Props = {
   libraries: Array<{ libraryId: string; libraryName: string }>;
 };
 
+// Sentinel used in place of "" for "no filter selected" options.
+// @radix-ui/react-select forbids empty-string SelectItem values at
+// runtime (it reserves "" to mean "clear / show placeholder"), so the
+// previous `value=""` items crashed the toolbar on render. We use this
+// sentinel internally and translate to/from "" at the Select boundary
+// so the parent / API layer keeps its plain-string contract.
+const NONE = "__none__";
+const fromNone = (v: string): string => (v === NONE ? "" : v);
+const toNone = (v: string): string => (v === "" ? NONE : v);
+
 // CatalogToolbar is the sticky search + filter row above the grid.
 // All state lives in the parent; this is a controlled component so
 // debouncing / URL syncing can happen one level up.
@@ -71,10 +81,13 @@ export function CatalogToolbar({ value, onChange, filters, libraries }: Props) {
         </SelectContent>
       </Select>
 
-      <Select value={value.libraryId} onValueChange={(v) => onChange({ ...value, libraryId: v })}>
+      <Select
+        value={toNone(value.libraryId)}
+        onValueChange={(v) => onChange({ ...value, libraryId: fromNone(v) })}
+      >
         <SelectTrigger><SelectValue placeholder="Library" /></SelectTrigger>
         <SelectContent>
-          <SelectItem value="">All libraries</SelectItem>
+          <SelectItem value={NONE}>All libraries</SelectItem>
           {libraries.map((lib) => (
             <SelectItem key={lib.libraryId} value={lib.libraryId}>
               {lib.libraryName}
@@ -83,10 +96,13 @@ export function CatalogToolbar({ value, onChange, filters, libraries }: Props) {
         </SelectContent>
       </Select>
 
-      <Select value={value.genre} onValueChange={(v) => onChange({ ...value, genre: v })}>
+      <Select
+        value={toNone(value.genre)}
+        onValueChange={(v) => onChange({ ...value, genre: fromNone(v) })}
+      >
         <SelectTrigger><SelectValue placeholder="Genre" /></SelectTrigger>
         <SelectContent>
-          <SelectItem value="">All genres</SelectItem>
+          <SelectItem value={NONE}>All genres</SelectItem>
           {(filters?.genres ?? []).map((g) => (
             <SelectItem key={g} value={g}>
               {g}
@@ -95,10 +111,13 @@ export function CatalogToolbar({ value, onChange, filters, libraries }: Props) {
         </SelectContent>
       </Select>
 
-      <Select value={value.yearBucket} onValueChange={(v) => onChange({ ...value, yearBucket: v })}>
+      <Select
+        value={toNone(value.yearBucket)}
+        onValueChange={(v) => onChange({ ...value, yearBucket: fromNone(v) })}
+      >
         <SelectTrigger><SelectValue placeholder="Decade" /></SelectTrigger>
         <SelectContent>
-          <SelectItem value="">Any year</SelectItem>
+          <SelectItem value={NONE}>Any year</SelectItem>
           {(filters?.decades ?? []).map((d) => (
             <SelectItem key={d.label} value={`${d.yearMin}-${d.yearMax}`}>
               {d.label}

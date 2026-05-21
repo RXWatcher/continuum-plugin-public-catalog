@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -105,9 +106,26 @@ func main() {
 		}))
 
 		if addr := cfg.StandaloneHTTPListen; addr != "" {
+			var bindErr error
 			started := false
 			standaloneOnce.Do(func() {
 				started = true
+				// Synchronous bind: a port-already-in-use / permission
+				// failure has to surface from this Configure RPC, not
+				// asynchronously in a logger.Error a few ms later
+				// while the plugin reports success. Hand the bound
+				// listener off to a goroutine for the serve loop.
+				ln, err := net.Listen("tcp", addr)
+				if err != nil {
+					bindErr = fmt.Errorf("bind standalone listener %q: %w", addr, err)
+					return
+				}
+				if pluginrt.IsWildcardListen(addr) {
+					logger.Warn(
+						"standalone listener bound to ALL interfaces; prefer 127.0.0.1:port behind a reverse proxy unless this is intentional",
+						"addr", addr,
+					)
+				}
 				standaloneAddr.Store(addr)
 				sl := &http.Server{
 					Addr:              addr,
@@ -118,16 +136,27 @@ func main() {
 					IdleTimeout:       120 * time.Second,
 				}
 				standaloneSrv.Store(sl)
+				logger.Info("standalone http listener bound", "addr", ln.Addr().String())
 				go func() {
-					logger.Info("standalone http listener starting", "addr", addr)
-					if err := sl.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					if err := sl.Serve(ln); err != nil && err != http.ErrServerClosed {
 						logger.Error("standalone http listener failed", "addr", addr, "err", err)
 					}
 				}()
 			})
+			if bindErr != nil {
+				return bindErr
+			}
 			if !started {
 				if prev, _ := standaloneAddr.Load().(string); prev != addr {
-					logger.Warn("standalone_http_listen changed; restart the plugin to apply", "current", prev, "requested", addr)
+					// Match `hUpdateConfig`'s admin-API behavior: a
+					// listener change once we're bound is an error,
+					// not a warning. Operator must revert the addr
+					// (configure succeeds again on the old value) or
+					// restart the plugin to bind the new one.
+					return fmt.Errorf(
+						"standalone_http_listen change from %q to %q requires a plugin restart",
+						prev, addr,
+					)
 				}
 			}
 		}
