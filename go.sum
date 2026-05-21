@@ -2,6 +2,8 @@ github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 h1:L/gRVlceqvL25
 github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
 github.com/ContinuumApp/continuum-plugin-sdk v0.3.10 h1:GLakoOydVwyi/uwzfWg+xCjpmbIFP3uEmpuZLjkPx6g=
 github.com/ContinuumApp/continuum-plugin-sdk v0.3.10/go.mod h1:sYhMYE2FwVY5/THvEIOwVYXsCVWis5GDSTVT9dXg0H4=
+github.com/ContinuumApp/continuum-plugin-sdk v0.3.11-0.20260521160842-aa4c7c67bb96 h1:gqR1N7rKjSHw027KDh1axGuE5zsV3Zjz6uPxXlV8sOY=
+github.com/ContinuumApp/continuum-plugin-sdk v0.3.11-0.20260521160842-aa4c7c67bb96/go.mod h1:sYhMYE2FwVY5/THvEIOwVYXsCVWis5GDSTVT9dXg0H4=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/bufbuild/protocompile v0.14.1 h1:iA73zAf/fyljNjQKwYzUHD6AD4R8KMasmwa/FBatYVw=
