@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
 )
 
 // hCatalogLogin validates a supplied password against the stored bcrypt

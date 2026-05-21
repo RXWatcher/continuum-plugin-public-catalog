@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	pluginrt "github.com/ContinuumApp/continuum-plugin-public-catalog/internal/runtime"
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
+	pluginrt "github.com/RXWatcher/continuum-plugin-public-catalog/internal/runtime"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 

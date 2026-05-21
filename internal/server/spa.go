@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
 )
 
 //go:embed public/dist/* public/dist/assets/*

@@ -24,11 +24,11 @@ import (
 	publicmanifest "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/manifest"
 	sdkruntime "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtime"
 
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/httproutes"
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/migrate"
-	pluginrt "github.com/ContinuumApp/continuum-plugin-public-catalog/internal/runtime"
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/server"
-	"github.com/ContinuumApp/continuum-plugin-public-catalog/internal/store"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/httproutes"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/migrate"
+	pluginrt "github.com/RXWatcher/continuum-plugin-public-catalog/internal/runtime"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/server"
+	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
 )
 
 //go:embed manifest.json
