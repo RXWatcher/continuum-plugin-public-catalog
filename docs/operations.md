@@ -1,7 +1,7 @@
 # Operations
 
 Operator-facing runbook for installing, upgrading, and maintaining the
-`continuum.public-catalog` plugin. The [README](../README.md) is the
+`silo.public-catalog` plugin. The [README](../README.md) is the
 source of truth for the config keys themselves; this file covers the
 DB/role bootstrap, listener choices, and lifecycle events the README
 doesn't.
@@ -37,7 +37,7 @@ DSN shape (must include `search_path=public_catalog` so the embedded
 migrations and unqualified queries target the right schema):
 
 ```
-postgres://plugin_public_catalog:...@host:5432/continuum?search_path=public_catalog&sslmode=disable
+postgres://plugin_public_catalog:...@host:5432/silo?search_path=public_catalog&sslmode=disable
 ```
 
 If a query against any of the above public.* tables fails with
@@ -50,10 +50,10 @@ image overlay leaves the SPA with internal-path posters. See
 ## First install checklist
 
 1. Create the role, schema, and grants above.
-2. Install the plugin in Continuum. Configure only `database_url` at
+2. Install the plugin in Silo. Configure only `database_url` at
    first — it's the one required field. Everything else has defaults or
    is generated.
-3. Open `/admin` (visible in the Continuum admin nav as "Public
+3. Open `/admin` (visible in the Silo admin nav as "Public
    Catalog"). The settings form is rendered from the redacted config
    returned by `GET /api/admin/config`.
 4. Set `public_base_url` to the externally-reachable URL. Without it,
@@ -72,18 +72,18 @@ image overlay leaves the SPA with internal-path posters. See
 
 ## Listener modes
 
-The plugin always registers its routes through Continuum's
+The plugin always registers its routes through Silo's
 `http_routes.v1` capability so the host can proxy them on the
-admin/Continuum hostname. It can ALSO bind a standalone HTTP listener
-for direct public access, separate from Continuum's main listener.
+admin/Silo hostname. It can ALSO bind a standalone HTTP listener
+for direct public access, separate from Silo's main listener.
 
 | Mode | When to use | How to configure |
 | --- | --- | --- |
-| Host-proxied only | Single domain, Continuum already terminates TLS, you proxy `/public-catalog/*` to the host. | Leave `public_port` and `standalone_http_listen` empty. |
+| Host-proxied only | Single domain, Silo already terminates TLS, you proxy `/public-catalog/*` to the host. | Leave `public_port` and `standalone_http_listen` empty. |
 | Loopback + reverse proxy | Recommended for production. Bind to `127.0.0.1:8090` and front with nginx/Caddy. | `standalone_http_listen=127.0.0.1:8090`. |
 | Wildcard | Quick demos / dev. | `public_port=8090` (synthesises `:8090`) or `standalone_http_listen=:8090`. Logs a warning at start: `standalone listener bound to ALL interfaces; prefer 127.0.0.1:port behind a reverse proxy unless this is intentional` (`cmd/.../main.go`). |
 
-Implementation notes (see `cmd/continuum-plugin-public-catalog/main.go`):
+Implementation notes (see `cmd/silo-plugin-public-catalog/main.go`):
 
 - The bind happens **synchronously** during the Configure RPC, so a
   bad port or permission failure surfaces as a clean config-error in the

@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	pluginrt "github.com/RXWatcher/continuum-plugin-public-catalog/internal/runtime"
-	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
+	pluginrt "github.com/RXWatcher/silo-plugin-public-catalog/internal/runtime"
+	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
 )
 
 type createTokenRequest struct {

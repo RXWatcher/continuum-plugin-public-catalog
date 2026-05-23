@@ -1,6 +1,6 @@
 // Package server is the chi-mounted HTTP handler for the public-catalog
 // plugin. It serves the public landing page and catalog browser to
-// anonymous visitors, the admin console to Continuum operators, and a
+// anonymous visitors, the admin console to Silo operators, and a
 // JSON API used by both surfaces.
 //
 // Files in this package:
@@ -30,8 +30,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hashicorp/go-hclog"
 
-	pluginrt "github.com/RXWatcher/continuum-plugin-public-catalog/internal/runtime"
-	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
+	pluginrt "github.com/RXWatcher/silo-plugin-public-catalog/internal/runtime"
+	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 

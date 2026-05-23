@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	pluginrt "github.com/RXWatcher/continuum-plugin-public-catalog/internal/runtime"
+	pluginrt "github.com/RXWatcher/silo-plugin-public-catalog/internal/runtime"
 )
 
 // GetConfig reads the singleton app_config row, decodes the JSONB payload

@@ -6,7 +6,7 @@ import (
 )
 
 // securityHeaders applies a small set of response hardening defaults
-// matching the rest of Continuum. Catalog pages get Cache-Control:
+// matching the rest of Silo. Catalog pages get Cache-Control:
 // no-store so a shared cache (browser or reverse proxy) can't leak
 // session-gated catalog HTML, and public API responses pick up
 // no-store too since they're session-dependent.
@@ -30,16 +30,16 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 // requireAdmin gates admin routes on the host-stamped identity header.
-// The host strips inbound X-Continuum-* identity headers from public
-// requests before forwarding to the plugin, so seeing X-Continuum-User-Role
+// The host strips inbound X-Silo-* identity headers from public
+// requests before forwarding to the plugin, so seeing X-Silo-User-Role
 // here is a trustworthy signal.
 func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Continuum-User-Id") == "" {
+		if r.Header.Get("X-Silo-User-Id") == "" {
 			writeErr(w, http.StatusUnauthorized, "unauthenticated", "admin login required")
 			return
 		}
-		if r.Header.Get("X-Continuum-User-Role") != "admin" {
+		if r.Header.Get("X-Silo-User-Role") != "admin" {
 			writeErr(w, http.StatusForbidden, "forbidden", "admin access required")
 			return
 		}

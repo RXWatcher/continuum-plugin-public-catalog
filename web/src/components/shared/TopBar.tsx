@@ -20,7 +20,7 @@ export function TopBar({ homeHref = "./", eyebrow, title, subtitle, trailing }: 
           className="text-muted-foreground hover:text-foreground inline-flex w-fit items-center gap-2 text-xs font-medium uppercase tracking-[0.16em]"
         >
           <Library className="h-3.5 w-3.5" />
-          Continuum public catalog
+          Silo public catalog
         </a>
         {eyebrow && (
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-accent">{eyebrow}</p>

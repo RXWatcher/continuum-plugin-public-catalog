@@ -67,7 +67,7 @@ func (s *RuntimeHostSource) List(ctx context.Context, host Host, req runtimehost
 
 func (s *RuntimeHostSource) getJSON(ctx context.Context, host Host, path string, query map[string]any, out any) error {
 	if host == nil {
-		return fmt.Errorf("continuum host is not connected")
+		return fmt.Errorf("silo host is not connected")
 	}
 	if err := host.CallPluginJSON(ctx, runtimehost.CallPluginJSONRequest{
 		InstallationID: s.installationID,

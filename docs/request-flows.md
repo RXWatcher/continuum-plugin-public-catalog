@@ -14,8 +14,8 @@ so relative asset paths still resolve. The SPA reads
 `window.__PUBLIC_CATALOG_BOOTSTRAP` and routes accordingly.
 
 `adminTheme` (same file) picks the theme from the `?theme=` query, the
-`X-Continuum-Theme` request header (set by the host's proxy), or the
-`X-Continuum-User-Theme` header, falling back to
+`X-Silo-Theme` request header (set by the host's proxy), or the
+`X-Silo-User-Theme` header, falling back to
 `midnight-cinema` when no theme is supplied. Themes are HTML-escaped
 before being inserted as an attribute.
 
@@ -153,8 +153,8 @@ silently dropping.
 ## Admin API
 
 All routes under `/api/admin/*` and `/admin` go through `requireAdmin`
-(`middleware.go`). The check trusts `X-Continuum-User-Id` and
-`X-Continuum-User-Role` because the host strips those headers from
+(`middleware.go`). The check trusts `X-Silo-User-Id` and
+`X-Silo-User-Role` because the host strips those headers from
 public requests; if they reach the plugin they came from the host's
 authenticated routing.
 

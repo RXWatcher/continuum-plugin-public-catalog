@@ -1,5 +1,5 @@
 // captureTokenFromURL reads a one-shot bearer token from the URL on
-// first load (used by the Continuum admin to hand us authentication
+// first load (used by the Silo admin to hand us authentication
 // without a redirect dance), strips it from the address bar via
 // history.replaceState, and keeps it in memory for subsequent fetches.
 // The token never lands in localStorage / sessionStorage so it doesn't
@@ -10,11 +10,11 @@ export function captureTokenFromURL(): void {
   const params = new URLSearchParams(window.location.search);
   cachedToken = params.get("token") || "";
 
-  const theme = params.get("theme") || sessionStorage.getItem("continuum-theme") || "";
+  const theme = params.get("theme") || sessionStorage.getItem("silo-theme") || "";
   if (theme) {
     document.documentElement.dataset.theme = theme;
     try {
-      sessionStorage.setItem("continuum-theme", theme);
+      sessionStorage.setItem("silo-theme", theme);
     } catch {
       // private browsing tabs can't write — ignore
     }

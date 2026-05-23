@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	pluginrt "github.com/RXWatcher/continuum-plugin-public-catalog/internal/runtime"
-	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
+	pluginrt "github.com/RXWatcher/silo-plugin-public-catalog/internal/runtime"
+	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
 	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
@@ -231,8 +231,8 @@ func newTestDeps() (Deps, *fakeConfigStore, *fakeHost) {
 // adminHeaders sets the host-stamped identity headers an admin route
 // expects.
 func adminHeaders(r *http.Request) {
-	r.Header.Set("X-Continuum-User-Id", "1")
-	r.Header.Set("X-Continuum-User-Role", "admin")
+	r.Header.Set("X-Silo-User-Id", "1")
+	r.Header.Set("X-Silo-User-Role", "admin")
 }
 
 // --- Tests ---

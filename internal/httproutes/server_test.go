@@ -6,17 +6,17 @@ import (
 	"testing"
 )
 
-func TestStandaloneServeHTTPStripsContinuumHeaders(t *testing.T) {
+func TestStandaloneServeHTTPStripsSiloHeaders(t *testing.T) {
 	srv := NewServer()
 	srv.SetHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Continuum-User-Role") != "" {
-			t.Fatalf("forged Continuum header reached handler")
+		if r.Header.Get("X-Silo-User-Role") != "" {
+			t.Fatalf("forged Silo header reached handler")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Continuum-User-Role", "admin")
+	req.Header.Set("X-Silo-User-Role", "admin")
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 

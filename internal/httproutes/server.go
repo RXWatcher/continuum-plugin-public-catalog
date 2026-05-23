@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	pluginv1 "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginproto/continuum/plugin/v1"
+	pluginv1 "github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 )
 
 type Server struct {
@@ -37,7 +37,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k := range r.Header {
-		if strings.HasPrefix(strings.ToLower(k), "x-continuum-") {
+		if strings.HasPrefix(strings.ToLower(k), "x-silo-") {
 			r.Header.Del(k)
 		}
 	}

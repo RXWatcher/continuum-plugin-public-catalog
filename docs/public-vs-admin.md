@@ -9,7 +9,7 @@ SPA renders for a given user.
 These run with no authentication, or with whatever scope a catalog
 password or bypass token grants. They are reachable from the public
 internet when the standalone listener is bound directly, or via the
-host's public proxy when the routes are accessed through Continuum.
+host's public proxy when the routes are accessed through Silo.
 
 | URL | What the visitor sees |
 | --- | --- |
@@ -40,12 +40,12 @@ What visitors **never** see:
 
 All routes under `/api/admin/*` and `/admin` go through `requireAdmin`,
 which gates on host-stamped identity headers. The host strips inbound
-`X-Continuum-*` identity headers from public requests before forwarding,
+`X-Silo-*` identity headers from public requests before forwarding,
 so seeing them in the plugin is a trustworthy signal.
 
 | URL | Method | Use |
 | --- | --- | --- |
-| `/admin` | GET | Admin SPA. Visible in Continuum's admin nav as "Public Catalog". |
+| `/admin` | GET | Admin SPA. Visible in Silo's admin nav as "Public Catalog". |
 | `/api/admin/config` | GET / PATCH | Read or update plugin config. Secrets are redacted on read; live listener changes are rejected on write. |
 | `/api/admin/catalog-password` | DELETE | Clear the catalog password and force the gate off. |
 | `/api/admin/html-section` | GET / PUT | Read or replace the landing-page HTML block. 200 KB cap on writes. |
@@ -80,9 +80,9 @@ internet ──HTTP──▶ standalone listener (optional)
    (no gate)      (claim req'd) (requireAdmin)   (no gate)
                                       │
                                       └── requires host-stamped
-                                          X-Continuum-User-Id and
-                                          X-Continuum-User-Role=admin
-                                          headers (set by Continuum
+                                          X-Silo-User-Id and
+                                          X-Silo-User-Role=admin
+                                          headers (set by Silo
                                           on authenticated requests
                                           only)
 ```
@@ -92,7 +92,7 @@ The operator's choices for keeping the trust boundary intact:
 - Run the standalone listener on **loopback only** (`127.0.0.1:8090`)
   and front it with a reverse proxy that does TLS, rate-limiting, and
   any further IP allowlisting.
-- Use the Continuum host's existing proxy for the routes when you don't
+- Use the Silo host's existing proxy for the routes when you don't
   need a separate public hostname — that automatically inherits the
   host's CORS/CSRF/TLS posture.
 - Set `public_base_url` to the externally-resolvable URL so generated

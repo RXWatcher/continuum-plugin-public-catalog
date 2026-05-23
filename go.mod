@@ -1,4 +1,4 @@
-module github.com/RXWatcher/continuum-plugin-public-catalog
+module github.com/RXWatcher/silo-plugin-public-catalog
 
 go 1.26.0
 

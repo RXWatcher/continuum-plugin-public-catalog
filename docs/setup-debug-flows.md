@@ -1,6 +1,6 @@
 # Public Catalog: Setup, Debugging, And Flows
 
-Plugin ID: `continuum.public-catalog`. The capability and config table live
+Plugin ID: `silo.public-catalog`. The capability and config table live
 in the [README](../README.md) — this doc is the entry point to the operator
 runbook and the developer's tour of how requests, tokens, and stats move
 through the plugin.
@@ -24,10 +24,10 @@ The plugin serves three audiences from one Go binary:
    the catalog password or follow a signed bypass link — a catalog
    browser (`/catalog`, `/item/{id}`). Their entire experience runs on
    the embedded SPA in `internal/server/public/dist`.
-2. **Operators** configure the plugin through the Continuum admin UI
+2. **Operators** configure the plugin through the Silo admin UI
    (`/admin` mounted via `http_routes.v1` with `access: admin`) and the
-   admin JSON API at `/api/admin/*`. The Continuum host strips inbound
-   `X-Continuum-*` identity headers from public requests, so the role
+   admin JSON API at `/api/admin/*`. The Silo host strips inbound
+   `X-Silo-*` identity headers from public requests, so the role
    check in `requireAdmin` (`internal/server/middleware.go`) is
    trustworthy.
 3. **Other plugins** (companion ebook/audiobook installations) are

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/RXWatcher/continuum-plugin-public-catalog/internal/store"
+	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
 )
 
 //go:embed public/dist/* public/dist/assets/*
@@ -77,15 +77,15 @@ func writePublicApp(w http.ResponseWriter, r *http.Request, bootstrap publicBoot
 }
 
 // adminTheme picks the theme to render the admin SPA with. Falls back
-// to the host-provided X-Continuum-Theme header so the admin matches
-// the rest of Continuum's UI by default.
+// to the host-provided X-Silo-Theme header so the admin matches
+// the rest of Silo's UI by default.
 func adminTheme(r *http.Request) string {
 	theme := r.URL.Query().Get("theme")
 	if theme == "" {
-		theme = r.Header.Get("X-Continuum-Theme")
+		theme = r.Header.Get("X-Silo-Theme")
 	}
 	if theme == "" {
-		theme = r.Header.Get("X-Continuum-User-Theme")
+		theme = r.Header.Get("X-Silo-User-Theme")
 	}
 	if theme == "" {
 		theme = "default"

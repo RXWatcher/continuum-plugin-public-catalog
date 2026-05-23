@@ -6,7 +6,7 @@ non-obvious paths data takes between them.
 ## Process layout
 
 ```
-cmd/continuum-plugin-public-catalog/main.go   <- entrypoint, listener bind, lifecycle
+cmd/silo-plugin-public-catalog/main.go   <- entrypoint, listener bind, lifecycle
 internal/runtime                              <- Configure RPC + Config struct
 internal/migrate                              <- embedded SQL migrations
 internal/store                                <- Postgres access (own schema + public.*)
@@ -176,8 +176,8 @@ uniformly.
 
 ## Federated source plugin contract
 
-A companion plugin (typically `continuum.ebooks` or
-`continuum.audiobooks`) must expose:
+A companion plugin (typically `silo.ebooks` or
+`silo.audiobooks`) must expose:
 
 ```
 GET /api/v1/public-catalog/stats

@@ -107,7 +107,7 @@ Checks in order:
 1. **Host runtime unreachable**: `currentHost(d)` returns nil if the
    host SDK hasn't connected yet (e.g. during a host upgrade). The
    overlay silently no-ops, leaving the raw TMDB/TVDB paths which the
-   SPA can't render. Look for `failed to ... continuum host is not
+   SPA can't render. Look for `failed to ... silo host is not
    connected` lines in the log.
 2. **Missing GRANT on `public.media_items.poster_path`**:
    `CatalogMediaImagePaths` reads `mi.poster_path` and friends. Without

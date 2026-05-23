@@ -8,7 +8,7 @@ type Props = {
 
 // TrustedHTML renders operator-supplied HTML. The plugin's admin-only
 // writer (every write goes through requireAdmin server-side) means the
-// markup author is a real Continuum admin — but as defence in depth we
+// markup author is a real Silo admin — but as defence in depth we
 // still run it through DOMPurify so a compromised admin session or a
 // browser extension can't smuggle script content into other visitors'
 // pages.

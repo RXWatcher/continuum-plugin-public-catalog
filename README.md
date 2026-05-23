@@ -1,10 +1,10 @@
-# Public Catalog for Continuum
+# Public Catalog for Silo
 
-`continuum.public-catalog` is a public-facing advertising and catalog plugin for a Continuum deployment. It serves an anonymous landing page with library stats and operator-edited HTML, a searchable catalog gated by a shared password (or a per-recipient bypass token), and an admin console for operators to manage links, content, and settings.
+`silo.public-catalog` is a public-facing advertising and catalog plugin for a Silo deployment. It serves an anonymous landing page with library stats and operator-edited HTML, a searchable catalog gated by a shared password (or a per-recipient bypass token), and an admin console for operators to manage links, content, and settings.
 
 ## Category
 
-Lives under **Sharing**, alongside [`continuum.guest-pass`](https://github.com/RXWatcher/continuum-plugin-guest-pass) (per-item tightly scoped shares). Where guest-pass exposes a single item to a single recipient, public-catalog publishes the whole library to anonymous visitors and uses signed catalog tokens to scope what each shared link can browse.
+Lives under **Sharing**, alongside [`silo.guest-pass`](https://github.com/RXWatcher/silo-plugin-guest-pass) (per-item tightly scoped shares). Where guest-pass exposes a single item to a single recipient, public-catalog publishes the whole library to anonymous visitors and uses signed catalog tokens to scope what each shared link can browse.
 
 ## Capabilities
 
@@ -22,16 +22,16 @@ The plugin registers the following routes:
 | `/api/public/*` | `*` | public | Anonymous stats, catalog login. |
 | `/api/catalog/*` | `*` | public | Gated catalog JSON API (cookie or token claim). |
 | `/api/admin/*` | `*` | admin | Admin JSON API (config, links, HTML, tokens). |
-| `/admin` | `GET` | admin | Admin console SPA, navigable from Continuum's admin nav as "Public Catalog". |
+| `/admin` | `GET` | admin | Admin console SPA, navigable from Silo's admin nav as "Public Catalog". |
 
 ## Dependencies
 
-- Reads library data from the Continuum host via the SDK's `ListLibraryMedia`, `GetCatalogStats`, and the newer `ResolveCatalogImageURLs` method — used in `internal/server/handlers_catalog.go::overlayCatalogMediaImages` to resolve poster/backdrop paths returned by the local store fast path into signed, runtime-host-served image URLs.
+- Reads library data from the Silo host via the SDK's `ListLibraryMedia`, `GetCatalogStats`, and the newer `ResolveCatalogImageURLs` method — used in `internal/server/handlers_catalog.go::overlayCatalogMediaImages` to resolve poster/backdrop paths returned by the local store fast path into signed, runtime-host-served image URLs.
 - Falls back to the host SDK for catalog browsing when the local store fast path does not apply.
 - Reads `public.media_items`, `public.media_files`, `public.episodes`, `public.seasons`, `public.media_folders`, `public.media_item_libraries`, and `public.episode_libraries` directly from the host's Postgres schema for episode-level browsing, series/season expansion, and quality-bucket aggregation. These require explicit `GRANT SELECT` to the plugin role.
 - Federates stats and single-type browsing for ebooks and audiobooks from companion plugin installations via `host.CallPluginJSON`.
 
-Host: [`ContinuumApp/continuum`](https://github.com/ContinuumApp/continuum). SDK: [`ContinuumApp/continuum-plugin-sdk`](https://github.com/ContinuumApp/continuum-plugin-sdk).
+Host: [`ContinuumApp/silo`](https://github.com/ContinuumApp/silo). SDK: [`ContinuumApp/continuum-plugin-sdk`](https://github.com/ContinuumApp/continuum-plugin-sdk).
 
 ## External services
 
@@ -77,10 +77,10 @@ Configuration shape lives in `internal/runtime/runtime.go::Config` and round-tri
 ## Build and release
 
 ```bash
-make build   # web-build (Vite) then go build of cmd/continuum-plugin-public-catalog
+make build   # web-build (Vite) then go build of cmd/silo-plugin-public-catalog
 make test    # go test ./... + pnpm run test in web/
 ```
 
 The frontend lives in `web/` (React 19, TypeScript, Vite, Tailwind v4, Radix, isomorphic-dompurify, pnpm) and emits into `internal/server/public/dist`, which is `//go:embed`-ed into the binary.
 
-CI builds linux-amd64 binaries on push to main via the reusable workflow in [RXWatcher/continuum-plugin-repository](https://github.com/RXWatcher/continuum-plugin-repository) and publishes them to the catalog at [`./binaries/`](https://github.com/RXWatcher/continuum-plugin-repository/tree/main/binaries).
+CI builds linux-amd64 binaries on push to main via the reusable workflow in [RXWatcher/silo-plugin-repository](https://github.com/RXWatcher/silo-plugin-repository) and publishes them to the catalog at [`./binaries/`](https://github.com/RXWatcher/silo-plugin-repository/tree/main/binaries).

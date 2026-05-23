@@ -1,4 +1,4 @@
-// Continuum mounts each plugin under /api/v1/plugins/{installationId}/.
+// Silo mounts each plugin under /api/v1/plugins/{installationId}/.
 // The plugin's SPA can't know that mount path at build time, so this
 // helper pulls it out of window.location.pathname at runtime.
 
