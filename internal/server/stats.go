@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
-	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
+	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
 func hStats(d Deps) http.HandlerFunc {

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
-	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
+	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
 // statsCache memoises GetCatalogStats responses per library-id-set for

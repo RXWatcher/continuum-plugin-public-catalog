@@ -15,7 +15,7 @@ import (
 
 	pluginrt "github.com/RXWatcher/silo-plugin-public-catalog/internal/runtime"
 	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
-	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
+	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
 const testSecret = "01234567890123456789012345678901"

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
+	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
 type CatalogSource interface {

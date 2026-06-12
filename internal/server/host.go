@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
+	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
 // currentHost resolves the live host SDK client (or nil if the plugin

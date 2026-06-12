@@ -32,7 +32,7 @@ import (
 
 	pluginrt "github.com/RXWatcher/silo-plugin-public-catalog/internal/runtime"
 	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
-	"github.com/ContinuumApp/continuum-plugin-sdk/pkg/pluginsdk/runtimehost"
+	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
 // Host is the subset of the host SDK the server depends on. Captured as

@@ -31,7 +31,7 @@ The plugin registers the following routes:
 - Reads `public.media_items`, `public.media_files`, `public.episodes`, `public.seasons`, `public.media_folders`, `public.media_item_libraries`, and `public.episode_libraries` directly from the host's Postgres schema for episode-level browsing, series/season expansion, and quality-bucket aggregation. These require explicit `GRANT SELECT` to the plugin role.
 - Federates stats and single-type browsing for ebooks and audiobooks from companion plugin installations via `host.CallPluginJSON`.
 
-Host: [`ContinuumApp/silo`](https://github.com/ContinuumApp/silo). SDK: [`ContinuumApp/continuum-plugin-sdk`](https://github.com/ContinuumApp/continuum-plugin-sdk).
+Host: [`Silo-Server/silo-server`](https://github.com/Silo-Server/silo-server). SDK: [`Silo-Server/silo-plugin-sdk`](https://github.com/Silo-Server/silo-plugin-sdk).
 
 ## External services
 
