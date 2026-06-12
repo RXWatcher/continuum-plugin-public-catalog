@@ -76,7 +76,7 @@ func (c *catalogCache) setMedia(key string, resp *store.CatalogMediaResponse) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.media[key] = catalogMediaCacheEntry{expires: time.Now().Add(c.ttl), resp: resp}
-	if len(c.media) > 256 {
+	if len(c.media) > catalogMediaCacheCap {
 		c.pruneLocked()
 	}
 }
@@ -104,10 +104,20 @@ func (c *catalogCache) setFilters(key string, resp *store.CatalogFilters) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.filters[key] = catalogFiltersCacheEntry{expires: time.Now().Add(c.ttl), resp: resp}
-	if len(c.filters) > 128 {
+	if len(c.filters) > catalogFiltersCacheCap {
 		c.pruneLocked()
 	}
 }
+
+// Hard size caps for the in-memory catalog caches. pruneLocked first
+// drops expired entries, then — if a map is still over its cap (e.g.
+// under a distinct-query flood where nothing has expired yet) — evicts
+// the oldest entries by expiry until it fits. This bounds memory
+// independent of the TTL so the maps can't grow without limit.
+const (
+	catalogMediaCacheCap   = 256
+	catalogFiltersCacheCap = 128
+)
 
 func (c *catalogCache) pruneLocked() {
 	now := time.Now()
@@ -120,6 +130,40 @@ func (c *catalogCache) pruneLocked() {
 		if now.After(entry.expires) {
 			delete(c.filters, key)
 		}
+	}
+	evictOldestOverCap(c.media, catalogMediaCacheCap)
+	evictOldestOverCap(c.filters, catalogFiltersCacheCap)
+}
+
+// cacheEntry is satisfied by the cache entry types so the eviction
+// helper can read each entry's expiry generically.
+type cacheEntry interface {
+	expiry() time.Time
+}
+
+func (e catalogMediaCacheEntry) expiry() time.Time   { return e.expires }
+func (e catalogFiltersCacheEntry) expiry() time.Time { return e.expires }
+
+// evictOldestOverCap drops the entries with the earliest expiry until
+// len(m) <= cap. Used as a hard floor so distinct-query flooding can't
+// blow the map past its bound between TTL sweeps.
+func evictOldestOverCap[E cacheEntry](m map[string]E, cap int) {
+	if len(m) <= cap {
+		return
+	}
+	type keyed struct {
+		key     string
+		expires time.Time
+	}
+	ordered := make([]keyed, 0, len(m))
+	for key, entry := range m {
+		ordered = append(ordered, keyed{key: key, expires: entry.expiry()})
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].expires.Before(ordered[j].expires)
+	})
+	for i := 0; i < len(ordered) && len(m) > cap; i++ {
+		delete(m, ordered[i].key)
 	}
 }
 
