@@ -36,7 +36,15 @@ func (s *Store) GetConfig(ctx context.Context) (pluginrt.Config, error) {
 			return pluginrt.Config{}, fmt.Errorf("decode app_config: %w", err)
 		}
 	}
-	return pluginrt.NormalizeAppConfig(cfg)
+	normalized, err := pluginrt.NormalizeAppConfig(cfg)
+	if err != nil {
+		return pluginrt.Config{}, err
+	}
+	// Keep the hard default-deny library floor in lockstep with the
+	// persisted config on every read, so catalog queries can never lag
+	// behind an operator allowlist edit.
+	s.SetPublicLibraryIDs(normalized.PublicLibraryIDs)
+	return normalized, nil
 }
 
 // UpdateConfig validates and persists the supplied Config. If a plaintext
@@ -49,6 +57,8 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg pluginrt.Config) error {
 		return err
 	}
 	cfg.DatabaseURL = ""
+	// CatalogPasswordSet is a response-only flag; never persist it.
+	cfg.CatalogPasswordSet = false
 
 	if cfg.CatalogPassword != "" {
 		hash, err := HashCatalogPassword(cfg.CatalogPassword)

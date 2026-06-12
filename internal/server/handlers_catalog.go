@@ -12,6 +12,19 @@ import (
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 )
 
+// scopeHostLibraryIDs floors a token/request library scope to the public
+// allowlist before the server calls the host SDK directly (a path that
+// bypasses the store's own floor). Returns denyAll=true when the public
+// allowlist forbids everything in scope. When no ConfigStore is wired
+// (pure host mode, no allowlist available) it passes the scope through
+// unchanged so behaviour is unchanged for that deployment shape.
+func scopeHostLibraryIDs(d Deps, requested []string) (ids []string, denyAll bool) {
+	if d.ConfigStore == nil {
+		return cleanList(requested), false
+	}
+	return d.ConfigStore.ScopePublicLibraryIDs(requested)
+}
+
 // hCatalogMedia is the gated catalog browse endpoint. Source preference:
 //  1. Local store (DB fast path) for movie/series/episode requests
 //  2. Federated CatalogSource for single-type ebook/audiobook requests
@@ -79,6 +92,15 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
+
+		// Host-SDK / federated path bypasses the store's library floor,
+		// so apply the public allowlist here before reaching out.
+		flooredLibraryIDs, denyAll := scopeHostLibraryIDs(d, req.LibraryIDs)
+		if denyAll {
+			writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
+			return
+		}
+		req.LibraryIDs = flooredLibraryIDs
 
 		host := currentHost(d)
 		if host == nil {
@@ -232,8 +254,12 @@ func enrichCatalogItemImages(ctx context.Context, d Deps, claims tokenClaims, it
 		query = item.SeriesTitle
 		matchID = item.SeriesID
 	}
+	flooredLibraryIDs, denyAll := scopeHostLibraryIDs(d, claims.LibraryIDs)
+	if denyAll {
+		return
+	}
 	resp, err := host.ListLibraryMedia(ctx, runtimehost.ListLibraryMediaRequest{
-		LibraryIDs: claims.LibraryIDs,
+		LibraryIDs: flooredLibraryIDs,
 		MediaTypes: mediaTypes,
 		Query:      query,
 		Sort:       "title",

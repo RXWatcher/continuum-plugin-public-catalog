@@ -124,6 +124,9 @@ export type CatalogEpisode = {
 export type SavedCatalogLink = {
   id: number;
   name: string;
+  // slug is the unguessable identifier used in the public landing URL
+  // (?page=<slug>). The display name is never accepted for resolution.
+  slug: string;
   token: string;
   url: string;
   html: string;
@@ -134,8 +137,9 @@ export type SavedCatalogLink = {
 };
 
 // PluginConfig mirrors runtime.Config — the API returns it with
-// secret fields blanked out (token_secret, catalog_password). The
-// presence of catalog_password_hash signals whether a password is set.
+// secret fields blanked out (token_secret, catalog_password, and the
+// bcrypt hash). The boolean catalog_password_set signals whether a
+// password is configured without ever exposing the hash.
 export type PluginConfig = {
   token_secret?: string;
   token_secret_generated?: boolean;
@@ -145,11 +149,16 @@ export type PluginConfig = {
   ad_html?: string;
   published_html?: string;
   catalog_password?: string;
-  catalog_password_hash?: string;
+  // catalog_password_set is the response-only boolean signalling whether
+  // a password hash is stored. The bcrypt hash itself is never sent.
+  catalog_password_set?: boolean;
   catalog_password_required: boolean;
   token_ttl_hours?: number;
   ebook_installation_id?: string;
   audio_installation_id?: string;
+  // public_library_ids is the hard allowlist of host library ids the
+  // public catalog may ever expose. Empty means expose nothing.
+  public_library_ids?: string[];
 };
 
 // PublicBootstrap is the JSON the server bakes into the SPA shell

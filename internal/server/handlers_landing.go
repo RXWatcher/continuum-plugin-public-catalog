@@ -15,8 +15,11 @@ func hLanding(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		customHTML := ""
 		catalogHref := "catalog"
-		if name := strings.TrimSpace(r.URL.Query().Get("page")); name != "" && d.ConfigStore != nil {
-			if link, ok, err := d.ConfigStore.GetCatalogLinkByName(r.Context(), name); err == nil && ok {
+		// Resolve saved links only by their unguessable slug. The display
+		// name is NOT accepted here: the link's URL embeds a bypass token,
+		// so handing it out for a guessable name would leak that token.
+		if slug := strings.TrimSpace(r.URL.Query().Get("page")); slug != "" && d.ConfigStore != nil {
+			if link, ok, err := d.ConfigStore.GetCatalogLinkBySlug(r.Context(), slug); err == nil && ok {
 				customHTML = link.HTML
 				if strings.TrimSpace(link.URL) != "" {
 					catalogHref = link.URL
@@ -99,12 +102,15 @@ func hCatalogPage(d Deps) http.HandlerFunc {
 
 func hItemPage(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		_, ok := catalogClaimsFromRequest(d, r)
+		claims, ok := catalogClaimsFromRequest(d, r)
 		status := http.StatusOK
 		if !ok {
 			status = http.StatusUnauthorized
 		}
-		stats, _ := publicCatalogStats(r.Context(), d, nil)
+		// Scope stats to the visitor's token like the other handlers,
+		// instead of leaking all-library aggregates on the detail page.
+		stats, _ := publicCatalogStats(r.Context(), d, claims.LibraryIDs)
+		stats = scopeCatalogStats(stats, claims.MediaTypes)
 		writePublicApp(w, r, publicBootstrap{
 			Mode:         "detail",
 			Theme:        adminTheme(r),
@@ -136,8 +142,12 @@ func publicCatalogPreview(ctx context.Context, d Deps, r *http.Request, limit in
 	if host == nil {
 		return nil
 	}
+	flooredLibraryIDs, denyAll := scopeHostLibraryIDs(d, claims.LibraryIDs)
+	if denyAll {
+		return nil
+	}
 	req := runtimehost.ListLibraryMediaRequest{
-		LibraryIDs: claims.LibraryIDs,
+		LibraryIDs: flooredLibraryIDs,
 		MediaTypes: claims.MediaTypes,
 		Sort:       "added_at",
 		Descending: true,
@@ -252,4 +262,3 @@ func publicBaseURLForRequest(r *http.Request, d Deps) string {
 	}
 	return scheme + "://" + net.JoinHostPort(host, port) + "/"
 }
-

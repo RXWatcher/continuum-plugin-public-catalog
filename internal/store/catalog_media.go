@@ -10,7 +10,10 @@ import (
 // items. When the requested mediaTypes is exactly ["episode"], the
 // query joins through public.episodes for episode-level browsing.
 func (s *Store) CatalogMedia(ctx context.Context, q CatalogMediaQuery) (*CatalogMediaResponse, error) {
-	ids := cleanIDs(q.LibraryIDs)
+	ids, denyAll := s.allowedLibraryIDs(q.LibraryIDs)
+	if denyAll {
+		return &CatalogMediaResponse{}, nil
+	}
 	pageSize := q.PageSize
 	if pageSize < 1 {
 		pageSize = 48

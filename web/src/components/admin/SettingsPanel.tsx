@@ -23,7 +23,11 @@ export function SettingsPanel({ value, onSave }: Props) {
     ebook_installation_id: value.ebook_installation_id ?? "",
     audio_installation_id: value.audio_installation_id ?? "",
     token_ttl_hours: value.token_ttl_hours,
+    public_library_ids: value.public_library_ids ?? [],
   });
+  const [libraryIdsText, setLibraryIdsText] = useState(
+    (value.public_library_ids ?? []).join(", "),
+  );
   const [submitting, setSubmitting] = useState(false);
 
   const listenerLabel = formatListener(value);
@@ -64,7 +68,11 @@ export function SettingsPanel({ value, onSave }: Props) {
             e.preventDefault();
             setSubmitting(true);
             try {
-              await onSave(form);
+              const ids = libraryIdsText
+                .split(",")
+                .map((s) => s.trim())
+                .filter((s) => /^[0-9]+$/.test(s));
+              await onSave({ ...form, public_library_ids: ids });
             } finally {
               setSubmitting(false);
             }
@@ -102,6 +110,22 @@ export function SettingsPanel({ value, onSave }: Props) {
                 placeholder="43"
               />
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="public-library-ids">Publicly exposable library IDs</Label>
+            <Input
+              id="public-library-ids"
+              value={libraryIdsText}
+              onChange={(e) => setLibraryIdsText(e.target.value)}
+              placeholder="1, 2, 5"
+            />
+            <p className="text-xs text-muted-foreground">
+              Comma-separated host library (media folder) IDs allowed in the public
+              catalog. This is a hard allowlist:{" "}
+              <strong>leave empty to expose nothing</strong>. Bypass-link scopes can
+              only narrow this set, never widen it.
+            </p>
           </div>
 
           <div className="space-y-1.5">

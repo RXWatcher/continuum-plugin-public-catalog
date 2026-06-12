@@ -12,7 +12,10 @@ import (
 // payload. The ID may identify a top-level media item, a season, or an
 // episode; the lookup walks through the three tables in order.
 func (s *Store) CatalogItemDetail(ctx context.Context, contentID string, libraryIDs []string) (*CatalogItemDetail, error) {
-	ids := cleanIDs(libraryIDs)
+	ids, denyAll := s.allowedLibraryIDs(libraryIDs)
+	if denyAll {
+		return nil, fmt.Errorf("get catalog item: %w", ErrNotFound)
+	}
 	item, err := s.catalogRootItemDetail(ctx, contentID, ids)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("get catalog item: %w", err)

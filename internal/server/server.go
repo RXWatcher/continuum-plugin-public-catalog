@@ -55,6 +55,10 @@ type ConfigStore interface {
 	ClearCatalogPassword(ctx context.Context) error
 	RehashCatalogPassword(ctx context.Context, plaintext string) error
 
+	// ScopePublicLibraryIDs floors a requested/token library scope to the
+	// operator allowlist; denyAll is true when nothing may be exposed.
+	ScopePublicLibraryIDs(requested []string) (ids []string, denyAll bool)
+
 	CatalogStats(ctx context.Context, libraryIDs []string) (*store.CatalogStats, error)
 	CatalogMedia(ctx context.Context, q store.CatalogMediaQuery) (*store.CatalogMediaResponse, error)
 	CatalogFilters(ctx context.Context, libraryIDs, mediaTypes []string) (*store.CatalogFilters, error)
@@ -65,7 +69,7 @@ type ConfigStore interface {
 
 	SaveCatalogLink(ctx context.Context, link store.SavedCatalogLink) (store.SavedCatalogLink, error)
 	ListCatalogLinks(ctx context.Context) ([]store.SavedCatalogLink, error)
-	GetCatalogLinkByName(ctx context.Context, name string) (store.SavedCatalogLink, bool, error)
+	GetCatalogLinkBySlug(ctx context.Context, slug string) (store.SavedCatalogLink, bool, error)
 	DeleteCatalogLink(ctx context.Context, id int) error
 }
 
@@ -87,6 +91,10 @@ type Deps struct {
 
 	statsCache   *statsCache
 	catalogCache *catalogCache
+
+	loginLimiter  *loginLimiter
+	publicLimiter *ipRateLimiter
+	bcryptSem     *bcryptSemaphore
 }
 
 // New constructs the fully-composed handler. Routes:
@@ -107,6 +115,14 @@ func New(d Deps) http.Handler {
 	d.statsCache = &statsCache{ttl: d.StatsCacheTTL}
 	d.catalogCache = newCatalogCache(2 * time.Minute)
 
+	// Abuse controls. Login gets a strict per-IP attempt limiter plus a
+	// lockout; all bcrypt verifications share a global concurrency cap so
+	// a burst can't pin every CPU. The other public read endpoints get a
+	// looser per-IP request limiter.
+	d.loginLimiter = newLoginLimiter(8, 5*time.Minute)
+	d.publicLimiter = newIPRateLimiter(120, time.Minute)
+	d.bcryptSem = newBcryptSemaphore(maxConcurrentBcrypt())
+
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
@@ -117,14 +133,14 @@ func New(d Deps) http.Handler {
 	r.Get("/assets/*", hPublicAsset())
 	r.Get("/admin", requireAdmin(hAdminPage(d)))
 
-	r.Get("/api/public/stats", hStats(d))
+	r.Get("/api/public/stats", rateLimitMiddleware(d.publicLimiter, hStats(d)))
 	r.Post("/api/public/catalog-login", hCatalogLogin(d))
 
-	r.Get("/api/catalog/media", hCatalogMedia(d))
-	r.Get("/api/catalog/filters", hCatalogFilters(d))
-	r.Get("/api/catalog/items/{id}", hCatalogItemDetail(d))
-	r.Get("/api/catalog/items/{id}/seasons", hCatalogSeriesSeasons(d))
-	r.Get("/api/catalog/series/{id}/seasons/{season}/episodes", hCatalogSeasonEpisodes(d))
+	r.Get("/api/catalog/media", rateLimitMiddleware(d.publicLimiter, hCatalogMedia(d)))
+	r.Get("/api/catalog/filters", rateLimitMiddleware(d.publicLimiter, hCatalogFilters(d)))
+	r.Get("/api/catalog/items/{id}", rateLimitMiddleware(d.publicLimiter, hCatalogItemDetail(d)))
+	r.Get("/api/catalog/items/{id}/seasons", rateLimitMiddleware(d.publicLimiter, hCatalogSeriesSeasons(d)))
+	r.Get("/api/catalog/series/{id}/seasons/{season}/episodes", rateLimitMiddleware(d.publicLimiter, hCatalogSeasonEpisodes(d)))
 
 	r.Post("/api/admin/catalog-token", requireAdmin(hCreateToken(d)))
 	r.Get("/api/admin/catalog-links", requireAdmin(hListCatalogLinks(d)))

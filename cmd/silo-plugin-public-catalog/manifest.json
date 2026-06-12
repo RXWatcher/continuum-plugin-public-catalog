@@ -83,6 +83,22 @@
           }
         ]
       }
+    },
+    {
+      "key": "public_library_ids",
+      "title": "Publicly exposable library IDs",
+      "description": "Hard allowlist of host library (media folder) IDs that may EVER appear in the public catalog. Empty exposes nothing. Bypass-link scopes can only narrow this set.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}",
+      "required": false,
+      "admin_form": {
+        "fields": [
+          {
+            "key": "value",
+            "label": "Library IDs",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          }
+        ]
+      }
     }
   ]
 }

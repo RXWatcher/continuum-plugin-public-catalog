@@ -8,7 +8,10 @@ import (
 // CatalogSeriesSeasons returns all seasons of a given series, with
 // per-season poster URLs resolved from the provider image cache.
 func (s *Store) CatalogSeriesSeasons(ctx context.Context, seriesID string, libraryIDs []string) ([]CatalogSeason, error) {
-	ids := cleanIDs(libraryIDs)
+	ids, denyAll := s.allowedLibraryIDs(libraryIDs)
+	if denyAll {
+		return nil, nil
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.content_id, s.series_id, COALESCE(s.season_number, 0), COALESCE(s.title, ''),
 		       COALESCE(s.overview, ''), COALESCE(s.air_date::text, ''),
@@ -46,7 +49,10 @@ func (s *Store) CatalogSeriesSeasons(ctx context.Context, seriesID string, libra
 
 // CatalogSeasonEpisodes returns ordered episodes of a single season.
 func (s *Store) CatalogSeasonEpisodes(ctx context.Context, seriesID string, seasonNumber int, libraryIDs []string) ([]CatalogEpisode, error) {
-	ids := cleanIDs(libraryIDs)
+	ids, denyAll := s.allowedLibraryIDs(libraryIDs)
+	if denyAll {
+		return nil, nil
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT e.content_id, e.series_id, COALESCE(e.season_id, ''), COALESCE(e.season_number, 0),
 		       COALESCE(e.episode_number, 0), COALESCE(e.title, ''), COALESCE(e.overview, ''),

@@ -10,7 +10,10 @@ import (
 // from public.media_items / public.media_files because the host SDK's
 // GetCatalogStats doesn't expose quality buckets yet.
 func (s *Store) CatalogStats(ctx context.Context, libraryIDs []string) (*CatalogStats, error) {
-	ids := cleanIDs(libraryIDs)
+	ids, denyAll := s.allowedLibraryIDs(libraryIDs)
+	if denyAll {
+		return &CatalogStats{}, nil
+	}
 	stats := &CatalogStats{}
 
 	typeRows, err := s.pool.Query(ctx, `

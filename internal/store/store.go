@@ -14,8 +14,9 @@ package store
 
 import (
 	"errors"
-	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -26,6 +27,12 @@ var ErrNotFound = errors.New("not found")
 // Store wraps the connection pool. Construct with New.
 type Store struct {
 	pool *pgxpool.Pool
+
+	// publicMu guards publicLibraryIDs, which is reloaded whenever config
+	// changes (Bootstrap / UpdateConfig). It is the hard default-deny
+	// allowlist of host library ids the public catalog may EVER expose.
+	publicMu         sync.RWMutex
+	publicLibraryIDs []int
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -34,17 +41,91 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 // methods on Store instead.
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
+// SetPublicLibraryIDs installs the operator-curated allowlist of host
+// library ids that may be exposed publicly. Called on bootstrap and on
+// every config update so the scoping floor tracks live config. An empty
+// list means "expose nothing".
+func (s *Store) SetPublicLibraryIDs(ids []string) {
+	parsed := cleanIDs(ids)
+	s.publicMu.Lock()
+	s.publicLibraryIDs = parsed
+	s.publicMu.Unlock()
+}
+
+// ScopePublicLibraryIDs intersects a requested/token library scope with
+// the public allowlist floor and returns the result as string ids plus a
+// denyAll flag. Server handlers that bypass the store (e.g. host-SDK
+// ListLibraryMedia for ebooks/audiobooks or image enrichment) MUST floor
+// their library scope through this before calling out, so the allowlist
+// is enforced on every path, not just direct DB queries.
+func (s *Store) ScopePublicLibraryIDs(requested []string) (ids []string, denyAll bool) {
+	intIDs, deny := s.allowedLibraryIDs(requested)
+	if deny {
+		return nil, true
+	}
+	out := make([]string, 0, len(intIDs))
+	for _, id := range intIDs {
+		out = append(out, strconv.Itoa(id))
+	}
+	return out, false
+}
+
+// allowedLibraryIDs returns the FINAL, hard-floored set of library ids a
+// query may touch, plus a denyAll flag. It intersects the public
+// allowlist (default-deny floor) with the optional per-request/token
+// scope. Rules:
+//
+//   - Empty allowlist  -> denyAll = true (expose nothing, ever).
+//   - Empty request    -> the full allowlist.
+//   - Non-empty request-> allowlist ∩ request; if the intersection is
+//     empty the request asked only for forbidden libraries, so denyAll.
+//
+// Every catalog store query MUST route its library scoping through this
+// helper so the floor can't be forgotten.
+func (s *Store) allowedLibraryIDs(requested []string) (ids []int, denyAll bool) {
+	s.publicMu.RLock()
+	allow := s.publicLibraryIDs
+	s.publicMu.RUnlock()
+
+	if len(allow) == 0 {
+		return nil, true
+	}
+	req := cleanIDs(requested)
+	if len(req) == 0 {
+		out := make([]int, len(allow))
+		copy(out, allow)
+		return out, false
+	}
+	allowSet := make(map[int]bool, len(allow))
+	for _, id := range allow {
+		allowSet[id] = true
+	}
+	out := make([]int, 0, len(req))
+	for _, id := range req {
+		if allowSet[id] {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil, true
+	}
+	return out, false
+}
+
 func cleanIDs(in []string) []int {
 	out := []int{}
+	seen := map[int]bool{}
 	for _, raw := range in {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
 		}
-		var id int
-		if _, err := fmt.Sscanf(raw, "%d", &id); err == nil && id > 0 {
-			out = append(out, id)
+		id, err := strconv.Atoi(raw)
+		if err != nil || id <= 0 || seen[id] {
+			continue
 		}
+		seen[id] = true
+		out = append(out, id)
 	}
 	return out
 }

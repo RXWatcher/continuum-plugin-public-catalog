@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,22 +24,27 @@ import (
 // DatabaseURL is manifest-only (we can't talk to Postgres until we know its
 // DSN). Everything else round-trips through app_config.data as JSONB.
 type Config struct {
-	DatabaseURL             string `json:"-"`
-	TokenSecret             string `json:"token_secret,omitempty"`
-	TokenSecretGenerated    bool   `json:"token_secret_generated,omitempty"`
-	StandaloneHTTPListen    string `json:"standalone_http_listen,omitempty"`
-	PublicPort              int    `json:"public_port,omitempty"`
-	PublicBaseURL           string `json:"public_base_url,omitempty"`
-	AdHTML                  string `json:"ad_html,omitempty"`
-	PublishedHTML           string `json:"published_html,omitempty"`
+	DatabaseURL          string `json:"-"`
+	TokenSecret          string `json:"token_secret,omitempty"`
+	TokenSecretGenerated bool   `json:"token_secret_generated,omitempty"`
+	StandaloneHTTPListen string `json:"standalone_http_listen,omitempty"`
+	PublicPort           int    `json:"public_port,omitempty"`
+	PublicBaseURL        string `json:"public_base_url,omitempty"`
+	AdHTML               string `json:"ad_html,omitempty"`
+	PublishedHTML        string `json:"published_html,omitempty"`
 	// CatalogPassword carries an operator-supplied plaintext password from
 	// the manifest config or the admin UI. It is never persisted as
 	// plaintext: store.Bootstrap and store.UpdateConfig both hash it into
 	// CatalogPasswordHash on write and clear this field.
 	CatalogPassword string `json:"catalog_password,omitempty"`
 	// CatalogPasswordHash is the bcrypt hash of the catalog password.
-	// Empty when no password has been set.
+	// Empty when no password has been set. NEVER serialised to the admin
+	// API — redactConfig strips it and sets CatalogPasswordSet instead.
 	CatalogPasswordHash string `json:"catalog_password_hash,omitempty"`
+	// CatalogPasswordSet is a response-only signal for the admin UI: true
+	// when a password hash is stored, without ever exposing the hash. It
+	// is never persisted (the store always clears it before writing).
+	CatalogPasswordSet bool `json:"catalog_password_set,omitempty"`
 	// CatalogPasswordRequired controls whether browsing /catalog needs
 	// the password (or a bypass token). When false the catalog is open
 	// to anyone, regardless of whether a hash is stored. Letting an
@@ -48,6 +54,13 @@ type Config struct {
 	TokenTTLHours           int    `json:"token_ttl_hours,omitempty"`
 	EbookInstallationID     string `json:"ebook_installation_id,omitempty"`
 	AudioInstallationID     string `json:"audio_installation_id,omitempty"`
+	// PublicLibraryIDs is the operator-curated allowlist of host library
+	// (media_folder) IDs that may EVER be exposed through the public
+	// catalog. It is a hard default-deny floor: every catalog store query
+	// is scoped to the intersection of this list and any token claim, so
+	// an empty list exposes NOTHING regardless of token scope. Bypass
+	// tokens can only further narrow this set, never widen it.
+	PublicLibraryIDs []string `json:"public_library_ids,omitempty"`
 }
 
 type Server struct {
@@ -103,7 +116,40 @@ func NormalizeAppConfig(cfg Config) (Config, error) {
 	if cfg.TokenTTLHours < 1 {
 		cfg.TokenTTLHours = 168
 	}
+	cfg.PublicLibraryIDs = normalizeLibraryIDs(cfg.PublicLibraryIDs)
 	return cfg, nil
+}
+
+// normalizeLibraryIDs canonicalises the public-library allowlist: trims
+// blanks, drops anything that isn't a positive integer id, and dedupes
+// while preserving first-seen order. A nil/empty result means "expose
+// nothing" downstream, so we intentionally do not invent defaults here.
+func normalizeLibraryIDs(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			continue
+		}
+		canon := strconv.Itoa(n)
+		if seen[canon] {
+			continue
+		}
+		seen[canon] = true
+		out = append(out, canon)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // validateListenAddr catches syntactic problems with the configured
@@ -173,6 +219,8 @@ func (s *Server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 			cfg.EbookInstallationID = stringValue(m["value"], firstString(m))
 		case "audiobook_installation_id":
 			cfg.AudioInstallationID = stringValue(m["value"], firstString(m))
+		case "public_library_ids":
+			cfg.PublicLibraryIDs = stringSliceValue(m["value"], firstSlice(m))
 		}
 	}
 	if cfg.DatabaseURL == "" {
@@ -228,6 +276,42 @@ func firstNumber(m map[string]any) any {
 	for _, v := range m {
 		if _, ok := v.(float64); ok {
 			return v
+		}
+	}
+	return nil
+}
+
+func firstSlice(m map[string]any) any {
+	for _, v := range m {
+		if _, ok := v.([]any); ok {
+			return v
+		}
+	}
+	return nil
+}
+
+// stringSliceValue coerces a manifest config value (a JSON array of
+// strings and/or numbers, decoded via structpb into []any) into a
+// []string. Non-string/number elements are dropped.
+func stringSliceValue(candidates ...any) []string {
+	for _, c := range candidates {
+		raw, ok := c.([]any)
+		if !ok {
+			continue
+		}
+		out := make([]string, 0, len(raw))
+		for _, el := range raw {
+			switch v := el.(type) {
+			case string:
+				if v != "" {
+					out = append(out, v)
+				}
+			case float64:
+				out = append(out, strconv.Itoa(int(v)))
+			}
+		}
+		if len(out) > 0 {
+			return out
 		}
 	}
 	return nil

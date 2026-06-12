@@ -10,7 +10,10 @@ import (
 // libraries+mediaTypes pair. When mediaTypes is ["episode"], the
 // filters come from public.episodes.
 func (s *Store) CatalogFilters(ctx context.Context, libraryIDs, mediaTypes []string) (*CatalogFilters, error) {
-	ids := cleanIDs(libraryIDs)
+	ids, denyAll := s.allowedLibraryIDs(libraryIDs)
+	if denyAll {
+		return &CatalogFilters{}, nil
+	}
 	types := cleanStrings(mediaTypes)
 	if len(types) == 1 && types[0] == "episode" {
 		return s.catalogEpisodeFilters(ctx, ids)
