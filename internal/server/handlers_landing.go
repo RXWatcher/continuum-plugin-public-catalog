@@ -66,7 +66,9 @@ func hCatalogPage(d Deps) http.HandlerFunc {
 				mediaKey := catalogMediaCacheKey([]string{libraryID}, claims.MediaTypes, "", "", 0, 0, "added_at", true, 60, "")
 				if resp, hit := d.catalogCache.getMedia(mediaKey); hit {
 					bootstrap.InitialItems = resp.Items
-					bootstrap.InitialNextPageToken = resp.NextPageToken
+					// The cache holds the raw inner cursor; sign it for the
+					// wire so the SPA's "load more" sends back a valid token.
+					bootstrap.InitialNextPageToken = signPageToken(d.TokenSecret, resp.NextPageToken)
 					bootstrap.InitialTotalCount = resp.TotalCount
 				} else if resp, err := d.ConfigStore.CatalogMedia(r.Context(), store.CatalogMediaQuery{
 					LibraryIDs: []string{libraryID},
@@ -84,7 +86,7 @@ func hCatalogPage(d Deps) http.HandlerFunc {
 					}, resp.Items)
 					d.catalogCache.setMedia(mediaKey, resp)
 					bootstrap.InitialItems = resp.Items
-					bootstrap.InitialNextPageToken = resp.NextPageToken
+					bootstrap.InitialNextPageToken = signPageToken(d.TokenSecret, resp.NextPageToken)
 					bootstrap.InitialTotalCount = resp.TotalCount
 				}
 				filterKey := catalogFiltersCacheKey([]string{libraryID}, claims.MediaTypes)

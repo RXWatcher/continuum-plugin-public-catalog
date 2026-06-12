@@ -50,6 +50,15 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "invalid_library", "requested library is not available for this catalog link")
 			return
 		}
+		// page_token arrives as a server-signed envelope; decode it back to
+		// the opaque inner cursor (e.g. "offset:48") before handing it to
+		// the store/host. A hand-crafted or over-deep token is rejected
+		// here so offsets can't be forged to enumerate past the result set.
+		innerPageToken, err := verifyPageToken(d.TokenSecret, q.Get("page_token"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_page_token", "page token is invalid or out of range")
+			return
+		}
 		req := runtimehost.ListLibraryMediaRequest{
 			LibraryIDs: libraryIDs,
 			MediaTypes: mediaTypes,
@@ -58,7 +67,7 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			Sort:       defaultString(q.Get("sort"), "title"),
 			Descending: q.Get("desc") == "true",
 			PageSize:   boundedInt(q.Get("page_size"), 48, 1, 100),
-			PageToken:  q.Get("page_token"),
+			PageToken:  innerPageToken,
 		}
 		req.YearMin = boundedInt(q.Get("year_min"), 0, 0, 9999)
 		req.YearMax = boundedInt(q.Get("year_max"), 0, 0, 9999)
@@ -67,7 +76,7 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 			cacheKey := catalogMediaCacheKey(libraryIDs, req.MediaTypes, req.Query, req.Genre, req.YearMin, req.YearMax, req.Sort, req.Descending, req.PageSize, req.PageToken)
 			if resp, hit := d.catalogCache.getMedia(cacheKey); hit {
 				w.Header().Set("X-Public-Catalog-Cache", "HIT")
-				writeJSON(w, http.StatusOK, resp)
+				writeSignedStoreMedia(w, d, resp)
 				return
 			}
 			resp, err := d.ConfigStore.CatalogMedia(r.Context(), store.CatalogMediaQuery{
@@ -87,9 +96,12 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 				return
 			}
 			overlayCatalogMediaImages(r.Context(), d, req, resp.Items)
+			// Cache the store response carrying the *inner* (unsigned)
+			// NextPageToken so the signature isn't baked into the shared
+			// entry; signing happens per-response below.
 			d.catalogCache.setMedia(cacheKey, resp)
 			w.Header().Set("X-Public-Catalog-Cache", "MISS")
-			writeJSON(w, http.StatusOK, resp)
+			writeSignedStoreMedia(w, d, resp)
 			return
 		}
 
@@ -115,7 +127,7 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 					writeErr(w, http.StatusBadGateway, "catalog_source_unavailable", "catalog source is unavailable")
 					return
 				}
-				writeJSON(w, http.StatusOK, resp)
+				writeSignedHostMedia(w, d, resp)
 				return
 			}
 		}
@@ -128,8 +140,34 @@ func hCatalogMedia(d Deps) http.HandlerFunc {
 		if req.PageToken == "" {
 			resp = appendSourceCatalogs(r.Context(), host, resp, d.Sources, req)
 		}
-		writeJSON(w, http.StatusOK, resp)
+		writeSignedHostMedia(w, d, resp)
 	}
+}
+
+// writeSignedStoreMedia emits a store-sourced media page, replacing the
+// store's plaintext inner NextPageToken ("offset:N") with a server-signed
+// envelope. It shallow-copies the response so the cached/original object
+// keeps the unsigned inner token (the Items slice is shared read-only).
+func writeSignedStoreMedia(w http.ResponseWriter, d Deps, resp *store.CatalogMediaResponse) {
+	if resp == nil {
+		writeJSON(w, http.StatusOK, &store.CatalogMediaResponse{})
+		return
+	}
+	out := *resp
+	out.NextPageToken = signPageToken(d.TokenSecret, resp.NextPageToken)
+	writeJSON(w, http.StatusOK, &out)
+}
+
+// writeSignedHostMedia is the host-SDK / federated-source equivalent of
+// writeSignedStoreMedia.
+func writeSignedHostMedia(w http.ResponseWriter, d Deps, resp *runtimehost.ListLibraryMediaResponse) {
+	if resp == nil {
+		writeJSON(w, http.StatusOK, emptyCatalogMediaResponse())
+		return
+	}
+	out := *resp
+	out.NextPageToken = signPageToken(d.TokenSecret, resp.NextPageToken)
+	writeJSON(w, http.StatusOK, &out)
 }
 
 func hCatalogFilters(d Deps) http.HandlerFunc {
