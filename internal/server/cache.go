@@ -25,6 +25,52 @@ type statsCacheEntry struct {
 	stats   *runtimehost.CatalogStats
 }
 
+// storeStatsCache memoises the combined store-path catalog stats
+// (direct-DB totals + federated source counts) per library-id-set for a
+// short TTL. The store-path stats query runs on every anonymous landing
+// hit, so an uncached re-query of Postgres per request is the hottest
+// avoidable load on the public surface. Mirrors statsCache (which covers
+// the host-SDK fallback path) for the DB fast path.
+type storeStatsCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[string]storeStatsCacheEntry
+}
+
+type storeStatsCacheEntry struct {
+	expires time.Time
+	stats   *store.CatalogStats
+}
+
+func newStoreStatsCache(ttl time.Duration) *storeStatsCache {
+	return &storeStatsCache{ttl: ttl, entries: map[string]storeStatsCacheEntry{}}
+}
+
+func (c *storeStatsCache) get(key string) (*store.CatalogStats, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || time.Now().After(entry.expires) {
+		if ok {
+			delete(c.entries, key)
+		}
+		return nil, false
+	}
+	return entry.stats, true
+}
+
+func (c *storeStatsCache) set(key string, stats *store.CatalogStats) {
+	if c == nil || stats == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = storeStatsCacheEntry{expires: time.Now().Add(c.ttl), stats: stats}
+}
+
 // catalogCache memoises rendered catalog media + filters pages for a
 // short TTL. Cache misses fall through to the store; hits are signalled
 // to clients via the X-Public-Catalog-Cache: HIT header.

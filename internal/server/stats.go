@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/RXWatcher/silo-plugin-public-catalog/internal/store"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
@@ -13,6 +14,16 @@ import (
 
 func hStats(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// /api/public/stats always reports unscoped (nil libraryIDs)
+		// aggregate counts: the response is identical for every visitor
+		// and carries no session-scoped data. For genuinely anonymous
+		// requests we can therefore relax the blanket no-store and allow a
+		// short shared-cache window matching the store-stats TTL. Any
+		// request that DOES carry a catalog session/token keeps no-store,
+		// since a shared cache must not serve a session-bearing response.
+		if !hasCatalogSession(r) {
+			setPublicStatsCacheControl(w, d.StatsCacheTTL)
+		}
 		stats, err := publicCatalogStats(r.Context(), d, nil)
 		if err != nil {
 			// Stats are best-effort on the public landing page — return
@@ -24,11 +35,41 @@ func hStats(d Deps) http.HandlerFunc {
 	}
 }
 
+// hasCatalogSession reports whether the request carries a catalog bypass
+// token or session cookie. Used to keep session-bearing responses out of
+// shared caches even on otherwise-public endpoints.
+func hasCatalogSession(r *http.Request) bool {
+	if strings.TrimSpace(r.URL.Query().Get("token")) != "" {
+		return true
+	}
+	if cookie, err := r.Cookie("public_catalog_auth"); err == nil && strings.TrimSpace(cookie.Value) != "" {
+		return true
+	}
+	return false
+}
+
+// setPublicStatsCacheControl stamps a short shared-cache window for the
+// anonymous public stats response, overriding the middleware's blanket
+// no-store. max-age tracks the store-stats TTL so a cached copy never
+// outlives the server-side memoised value by much.
+func setPublicStatsCacheControl(w http.ResponseWriter, ttl time.Duration) {
+	secs := int(ttl.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Cache-Control", "public, max-age="+strconv.Itoa(secs))
+	w.Header().Set("Vary", "Cookie")
+}
+
 // publicCatalogStats reads catalog totals via the store fast path
 // (direct DB) when available, falling back to the host SDK. Federated
 // stats from companion plugin sources are added on top.
 func publicCatalogStats(ctx context.Context, d Deps, libraryIDs []string) (*store.CatalogStats, error) {
 	if d.ConfigStore != nil {
+		cacheKey := statsCacheKey(libraryIDs)
+		if cached, ok := d.storeStatsCache.get(cacheKey); ok {
+			return cached, nil
+		}
 		stats, err := d.ConfigStore.CatalogStats(ctx, libraryIDs)
 		if err == nil && stats != nil && (stats.TotalItems > 0 || len(stats.MediaTypeCounts) > 0 || len(stats.LibraryCounts) > 0 || len(stats.QualityCounts) > 0) {
 			host := currentHost(d)
@@ -37,6 +78,7 @@ func publicCatalogStats(ctx context.Context, d Deps, libraryIDs []string) (*stor
 					stats = storeStatsFromRuntime(withSources, stats.QualityCounts)
 				}
 			}
+			d.storeStatsCache.set(cacheKey, stats)
 			return stats, nil
 		}
 	}

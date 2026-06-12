@@ -89,8 +89,9 @@ type Deps struct {
 	ConfigStore         ConfigStore
 	ApplyConfig         func(pluginrt.Config) error
 
-	statsCache   *statsCache
-	catalogCache *catalogCache
+	statsCache      *statsCache
+	storeStatsCache *storeStatsCache
+	catalogCache    *catalogCache
 
 	loginLimiter  *loginLimiter
 	publicLimiter *ipRateLimiter
@@ -113,6 +114,7 @@ func New(d Deps) http.Handler {
 		d.StatsCacheTTL = 30 * time.Second
 	}
 	d.statsCache = &statsCache{ttl: d.StatsCacheTTL}
+	d.storeStatsCache = newStoreStatsCache(d.StatsCacheTTL)
 	d.catalogCache = newCatalogCache(2 * time.Minute)
 
 	// Abuse controls. Login gets a strict per-IP attempt limiter plus a
