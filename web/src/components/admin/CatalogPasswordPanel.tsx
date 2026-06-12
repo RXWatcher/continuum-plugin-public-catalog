@@ -26,7 +26,7 @@ export function CatalogPasswordPanel({ config, onSave, onClear }: Props) {
   const [togglePending, setTogglePending] = useState(false);
   const [clearPending, setClearPending] = useState(false);
 
-  const hasHash = Boolean(config.catalog_password_hash);
+  const hasHash = Boolean(config.catalog_password_set);
 
   return (
     <Card>
