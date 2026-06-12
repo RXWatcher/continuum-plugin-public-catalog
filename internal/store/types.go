@@ -179,9 +179,13 @@ type CatalogEpisode struct {
 }
 
 // SavedCatalogLink is one operator-issued bypass link with its scope.
+// Slug is an unguessable identifier used to resolve the link from the
+// public landing page (?page=<slug>) without exposing the bypass token
+// via the guessable display name.
 type SavedCatalogLink struct {
 	ID         int       `json:"id"`
 	Name       string    `json:"name"`
+	Slug       string    `json:"slug"`
 	Token      string    `json:"token"`
 	URL        string    `json:"url"`
 	HTML       string    `json:"html"`

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,16 +11,35 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// SaveCatalogLink upserts a named bypass link by `name`. Returns the
-// persisted row (with timestamps populated).
+// generateLinkSlug returns an unguessable, URL-safe slug for a saved
+// link. 16 random bytes (128 bits) hex-encoded is collision-resistant
+// and not enumerable.
+func generateLinkSlug() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate link slug: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// SaveCatalogLink upserts a named bypass link by `name`. A stable,
+// unguessable slug is assigned on first insert and preserved across
+// updates (so a re-saved link keeps the same public ?page=<slug> URL).
+// Returns the persisted row (with timestamps populated).
 func (s *Store) SaveCatalogLink(ctx context.Context, link SavedCatalogLink) (SavedCatalogLink, error) {
 	link.Name = strings.TrimSpace(link.Name)
 	if link.Name == "" {
 		return SavedCatalogLink{}, fmt.Errorf("link name is required")
 	}
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO saved_catalog_links (name, token, url, html, media_types, library_ids)
-		VALUES ($1, $2, $3, $4, $5, $6)
+	slug, err := generateLinkSlug()
+	if err != nil {
+		return SavedCatalogLink{}, err
+	}
+	// On conflict (re-save of an existing name) keep the existing slug so
+	// previously-shared landing URLs don't break.
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO saved_catalog_links (name, slug, token, url, html, media_types, library_ids)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (name) DO UPDATE SET
 		  token = EXCLUDED.token,
 		  url = EXCLUDED.url,
@@ -26,9 +47,9 @@ func (s *Store) SaveCatalogLink(ctx context.Context, link SavedCatalogLink) (Sav
 		  media_types = EXCLUDED.media_types,
 		  library_ids = EXCLUDED.library_ids,
 		  updated_at = NOW()
-		RETURNING id, name, token, url, html, media_types, library_ids, created_at, updated_at
-	`, link.Name, link.Token, link.URL, link.HTML, link.MediaTypes, link.LibraryIDs).Scan(
-		&link.ID, &link.Name, &link.Token, &link.URL, &link.HTML, &link.MediaTypes, &link.LibraryIDs, &link.CreatedAt, &link.UpdatedAt,
+		RETURNING id, name, slug, token, url, html, media_types, library_ids, created_at, updated_at
+	`, link.Name, slug, link.Token, link.URL, link.HTML, link.MediaTypes, link.LibraryIDs).Scan(
+		&link.ID, &link.Name, &link.Slug, &link.Token, &link.URL, &link.HTML, &link.MediaTypes, &link.LibraryIDs, &link.CreatedAt, &link.UpdatedAt,
 	)
 	if err != nil {
 		return SavedCatalogLink{}, fmt.Errorf("save catalog link: %w", err)
@@ -39,7 +60,7 @@ func (s *Store) SaveCatalogLink(ctx context.Context, link SavedCatalogLink) (Sav
 // ListCatalogLinks returns all saved links ordered by most-recently-updated.
 func (s *Store) ListCatalogLinks(ctx context.Context) ([]SavedCatalogLink, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, token, url, html, media_types, library_ids, created_at, updated_at
+		SELECT id, name, slug, token, url, html, media_types, library_ids, created_at, updated_at
 		FROM saved_catalog_links
 		ORDER BY updated_at DESC, id DESC
 	`)
@@ -50,7 +71,7 @@ func (s *Store) ListCatalogLinks(ctx context.Context) ([]SavedCatalogLink, error
 	out := []SavedCatalogLink{}
 	for rows.Next() {
 		var link SavedCatalogLink
-		if err := rows.Scan(&link.ID, &link.Name, &link.Token, &link.URL, &link.HTML, &link.MediaTypes, &link.LibraryIDs, &link.CreatedAt, &link.UpdatedAt); err != nil {
+		if err := rows.Scan(&link.ID, &link.Name, &link.Slug, &link.Token, &link.URL, &link.HTML, &link.MediaTypes, &link.LibraryIDs, &link.CreatedAt, &link.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan catalog link: %w", err)
 		}
 		out = append(out, link)
@@ -61,20 +82,22 @@ func (s *Store) ListCatalogLinks(ctx context.Context) ([]SavedCatalogLink, error
 	return out, nil
 }
 
-// GetCatalogLinkByName looks up a single saved link. Returns
-// (zero, false, nil) if no link matches the given (case-insensitive)
-// name — separate signal from a real DB error.
-func (s *Store) GetCatalogLinkByName(ctx context.Context, name string) (SavedCatalogLink, bool, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
+// GetCatalogLinkBySlug looks up a single saved link by its unguessable
+// slug. Resolving by slug (instead of the guessable display name) is
+// what keeps the embedded bypass token from leaking to anyone who can
+// guess a link's name. Returns (zero, false, nil) when no link matches —
+// a separate signal from a real DB error.
+func (s *Store) GetCatalogLinkBySlug(ctx context.Context, slug string) (SavedCatalogLink, bool, error) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
 		return SavedCatalogLink{}, false, nil
 	}
 	var link SavedCatalogLink
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, token, url, html, media_types, library_ids, created_at, updated_at
+		SELECT id, name, slug, token, url, html, media_types, library_ids, created_at, updated_at
 		FROM saved_catalog_links
-		WHERE lower(name) = lower($1)
-	`, name).Scan(&link.ID, &link.Name, &link.Token, &link.URL, &link.HTML, &link.MediaTypes, &link.LibraryIDs, &link.CreatedAt, &link.UpdatedAt)
+		WHERE slug = $1
+	`, slug).Scan(&link.ID, &link.Name, &link.Slug, &link.Token, &link.URL, &link.HTML, &link.MediaTypes, &link.LibraryIDs, &link.CreatedAt, &link.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SavedCatalogLink{}, false, nil
 	}
