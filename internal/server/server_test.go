@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -151,6 +152,47 @@ func (s *fakeConfigStore) SetAdHTML(html string) {
 	s.cfg.AdHTML = html
 }
 
+// ScopePublicLibraryIDs mirrors the real store contract loosely: when no
+// allowlist is configured in the fake's config it passes the request
+// through (so handler tests that don't care about the floor keep
+// working); when an allowlist IS set it intersects, matching production.
+// The hard default-deny semantics are unit-tested against the real
+// *store.Store helper, not this fake.
+func (s *fakeConfigStore) ScopePublicLibraryIDs(requested []string) ([]string, bool) {
+	allow := s.snapshot().PublicLibraryIDs
+	clean := func(in []string) []string {
+		out := []string{}
+		for _, v := range in {
+			if v = strings.TrimSpace(v); v != "" {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	allow = clean(allow)
+	req := clean(requested)
+	if len(allow) == 0 {
+		return req, false
+	}
+	allowed := map[string]bool{}
+	for _, id := range allow {
+		allowed[id] = true
+	}
+	if len(req) == 0 {
+		return allow, false
+	}
+	out := []string{}
+	for _, id := range req {
+		if allowed[id] {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil, true
+	}
+	return out, false
+}
+
 func (s *fakeConfigStore) CatalogStats(context.Context, []string) (*store.CatalogStats, error) {
 	return &store.CatalogStats{}, nil
 }
@@ -177,6 +219,9 @@ func (s *fakeConfigStore) SaveCatalogLink(_ context.Context, link store.SavedCat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	link.ID = len(s.links) + 1
+	if link.Slug == "" {
+		link.Slug = fmt.Sprintf("slug-%d", link.ID)
+	}
 	link.CreatedAt = time.Now()
 	link.UpdatedAt = link.CreatedAt
 	s.links = append(s.links, link)
@@ -191,11 +236,11 @@ func (s *fakeConfigStore) ListCatalogLinks(context.Context) ([]store.SavedCatalo
 	return out, nil
 }
 
-func (s *fakeConfigStore) GetCatalogLinkByName(_ context.Context, name string) (store.SavedCatalogLink, bool, error) {
+func (s *fakeConfigStore) GetCatalogLinkBySlug(_ context.Context, slug string) (store.SavedCatalogLink, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, l := range s.links {
-		if strings.EqualFold(l.Name, name) {
+		if l.Slug != "" && l.Slug == slug {
 			return l, true, nil
 		}
 	}
@@ -472,6 +517,74 @@ func TestCatalogLoginRejectsWrongPassword(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCatalogLoginLocksOutAfterRepeatedFailures(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	cfg.SetPassword(t, "let-me-in")
+	h := New(d)
+
+	post := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/api/public/catalog-login", bytes.NewBufferString(`{"password":"wrong"}`))
+		req.RemoteAddr = "203.0.113.7:5555"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// The default limiter arms a lockout after 8 failures from one IP.
+	saw429 := false
+	for i := 0; i < 20; i++ {
+		code := post()
+		if code == http.StatusTooManyRequests {
+			saw429 = true
+			break
+		}
+		if code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401 or 429", i+1, code)
+		}
+	}
+	if !saw429 {
+		t.Fatalf("expected a 429 lockout after repeated failures, never saw one")
+	}
+
+	// A different IP is unaffected by the first IP's lockout.
+	req := httptest.NewRequest(http.MethodPost, "/api/public/catalog-login", bytes.NewBufferString(`{"password":"wrong"}`))
+	req.RemoteAddr = "198.51.100.4:5555"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("second IP status = %d, want 401 (not locked out)", rec.Code)
+	}
+}
+
+func TestLandingResolvesSavedLinkBySlugNotName(t *testing.T) {
+	d, cfg, _ := newTestDeps()
+	h := New(d)
+	saved, err := cfg.SaveCatalogLink(context.Background(), store.SavedCatalogLink{
+		Name: "Partner Promo",
+		URL:  "catalog?token=secret-bypass",
+		HTML: "<p>welcome partner</p>",
+	})
+	if err != nil {
+		t.Fatalf("save link: %v", err)
+	}
+
+	// Guessing the display name must NOT resolve the link (no token leak).
+	byName := httptest.NewRequest(http.MethodGet, "/?page=Partner+Promo", nil)
+	nameRec := httptest.NewRecorder()
+	h.ServeHTTP(nameRec, byName)
+	if strings.Contains(nameRec.Body.String(), "secret-bypass") {
+		t.Fatalf("display-name lookup leaked the bypass token")
+	}
+
+	// The unguessable slug resolves it.
+	bySlug := httptest.NewRequest(http.MethodGet, "/?page="+saved.Slug, nil)
+	slugRec := httptest.NewRecorder()
+	h.ServeHTTP(slugRec, bySlug)
+	if !strings.Contains(slugRec.Body.String(), "welcome partner") {
+		t.Fatalf("slug lookup did not render the saved link HTML; body=%s", slugRec.Body.String())
 	}
 }
 

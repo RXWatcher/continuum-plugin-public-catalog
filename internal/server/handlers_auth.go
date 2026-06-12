@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,15 @@ import (
 // that secret invalidates all outstanding sessions.
 func hCatalogLogin(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		// Per-IP lockout: reject before doing any bcrypt work once an IP
+		// has tripped the failure threshold.
+		if ok, retry := d.loginLimiter.allow(ip); !ok {
+			w.Header().Set("Retry-After", retryAfterSeconds(retry))
+			writeErr(w, http.StatusTooManyRequests, "rate_limited", "too many failed attempts; try again later")
+			return
+		}
+
 		var req struct {
 			Password string `json:"password"`
 		}
@@ -43,14 +53,27 @@ func hCatalogLogin(d Deps) http.HandlerFunc {
 		// pretend they succeed; the operator should disable
 		// CatalogPasswordRequired instead.
 		if cfg.CatalogPasswordHash == "" && cfg.CatalogPassword == "" {
+			d.loginLimiter.recordFailure(ip)
 			writeErr(w, http.StatusUnauthorized, "invalid_password", "catalog password is invalid")
 			return
 		}
 
-		switch store.VerifyCatalogPassword(cfg.CatalogPasswordHash, cfg.CatalogPassword, req.Password) {
+		// Global concurrency cap: bcrypt is intentionally expensive, so
+		// only a bounded number of verifications run at once. If the
+		// client disconnects while we wait, bail out.
+		if !d.bcryptSem.acquire(r.Context().Done()) {
+			writeErr(w, http.StatusServiceUnavailable, "busy", "server is busy; retry shortly")
+			return
+		}
+		result := store.VerifyCatalogPassword(cfg.CatalogPasswordHash, cfg.CatalogPassword, req.Password)
+		d.bcryptSem.release()
+
+		switch result {
 		case store.CatalogPasswordOK:
+			d.loginLimiter.recordSuccess(ip)
 			issueCatalogSession(w, r, d.TokenSecret)
 		case store.CatalogPasswordOKRehash:
+			d.loginLimiter.recordSuccess(ip)
 			// Background upgrade so a slow bcrypt write doesn't block
 			// the login response.
 			go func(pw string) {
@@ -62,9 +85,20 @@ func hCatalogLogin(d Deps) http.HandlerFunc {
 			}(req.Password)
 			issueCatalogSession(w, r, d.TokenSecret)
 		default:
+			d.loginLimiter.recordFailure(ip)
 			writeErr(w, http.StatusUnauthorized, "invalid_password", "catalog password is invalid")
 		}
 	}
+}
+
+// retryAfterSeconds renders a lockout duration as a whole-second
+// Retry-After header value (minimum 1).
+func retryAfterSeconds(d time.Duration) string {
+	secs := int(d.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	return strconv.Itoa(secs)
 }
 
 func issueCatalogSession(w http.ResponseWriter, r *http.Request, secret string) {
