@@ -3,19 +3,21 @@ module github.com/RXWatcher/silo-plugin-public-catalog
 go 1.26.0
 
 require (
-	github.com/ContinuumApp/continuum-plugin-sdk v0.3.11-0.20260521160842-aa4c7c67bb96
+	github.com/Silo-Server/silo-plugin-sdk v0.6.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/jackc/pgx/v5 v5.9.2
+	github.com/microcosm-cc/bluemonday v1.0.27
 	golang.org/x/crypto v0.51.0
 	google.golang.org/protobuf v1.36.11
 )
 
 require (
-	github.com/Silo-Server/silo-plugin-sdk v0.6.0 // indirect
+	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/gorilla/css v1.0.1 // indirect
 	github.com/hashicorp/go-plugin v1.8.0 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa // indirect

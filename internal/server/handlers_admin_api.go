@@ -59,11 +59,17 @@ func hCreateToken(d Deps) http.HandlerFunc {
 				writeErr(w, http.StatusServiceUnavailable, "config_store_unavailable", "config storage is not configured")
 				return
 			}
+			if !validRedirectURL(link) {
+				writeErr(w, http.StatusBadRequest, "invalid_url", "generated link URL is not a valid http(s)/relative URL")
+				return
+			}
 			saved, err := d.ConfigStore.SaveCatalogLink(r.Context(), store.SavedCatalogLink{
-				Name:       name,
-				Token:      token,
-				URL:        link,
-				HTML:       req.HTML,
+				Name:  name,
+				Token: token,
+				URL:   link,
+				// Sanitise operator HTML server-side (defence in depth
+				// with the admin UI's DOMPurify).
+				HTML:       sanitizeHTML(req.HTML),
 				MediaTypes: cleanList(req.MediaTypes),
 				LibraryIDs: cleanList(req.LibraryIDs),
 			})
@@ -147,7 +153,10 @@ func hSaveHTMLSection(d Deps) http.HandlerFunc {
 			writeInternal(w, r, d, "config_failed", err)
 			return
 		}
-		cfg.PublishedHTML = req.HTML
+		// Server-side sanitisation (defence in depth alongside the admin
+		// UI's DOMPurify) so stored HTML can never carry script/handlers
+		// even if it arrives via a direct API call.
+		cfg.PublishedHTML = sanitizeHTML(req.HTML)
 		if err := d.ConfigStore.UpdateConfig(r.Context(), cfg); err != nil {
 			writeInternal(w, r, d, "html_save_failed", err)
 			return
@@ -241,13 +250,14 @@ func hClearCatalogPassword(d Deps) http.HandlerFunc {
 }
 
 // redactConfig blanks out secret fields before returning the config to
-// the admin UI. The UI knows a value is set via the *Hash fields and
-// the password_required flag, but never sees the secret itself.
+// the admin UI. The UI learns whether a password is set via the boolean
+// CatalogPasswordSet flag — the bcrypt hash itself never leaves the
+// server.
 func redactConfig(cfg pluginrt.Config) pluginrt.Config {
 	cfg.TokenSecret = ""
 	cfg.CatalogPassword = ""
-	// Leave CatalogPasswordHash so the UI can show "password is set"
-	// vs "no password". Frontend should never display the hash itself.
+	cfg.CatalogPasswordSet = strings.TrimSpace(cfg.CatalogPasswordHash) != ""
+	cfg.CatalogPasswordHash = ""
 	return cfg
 }
 
